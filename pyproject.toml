@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agents-sync"
+version = "0.1.0"
+description = "Unified multi-device cloud synchronizer for ~/.agents (memory, skills, docs, traces, identity)."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Lolaplex" }]
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["agents", "sync", "cloud", "memory", "skills", "docs", "traces", "identity"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Archiving :: Mirroring",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Lolaplex/agents-sync"
+Repository = "https://github.com/Lolaplex/agents-sync"
+
+[project.scripts]
+agents-sync = "agents_sync.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
