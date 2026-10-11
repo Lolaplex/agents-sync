@@ -48,6 +48,17 @@ class TestMerge(unittest.TestCase):
         self.assertIn("ses_1", merged["sessions"])
         self.assertIn("ses_2", merged["sessions"])
 
+    def test_merge_jsonl_events(self):
+        from agents_sync.merge import merge_jsonl
+
+        l1 = '{"ts": "2026-10-11T12:00:00Z", "session": "ses_1", "tool": "read_file"}\n'
+        l2 = '{"ts": "2026-10-11T12:05:00Z", "session": "ses_2", "tool": "write_file"}\n'
+        merged = merge_jsonl(l1, l2)
+        lines = [json.loads(line) for line in merged.strip().splitlines()]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["session"], "ses_1")
+        self.assertEqual(lines[1]["session"], "ses_2")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,11 +54,7 @@ def collect_bundle(
             if not is_path_safe(rel_to_agents):
                 continue
 
-            # For traces: partition local trace files under traces/<node_id>/
             wire_key = rel_to_agents
-            if domain_name == "traces" and not rel_to_agents.startswith(f"traces/{node_id}/"):
-                sub_rel = p.relative_to(domain_root).as_posix()
-                wire_key = f"traces/{node_id}/{sub_rel}"
 
             try:
                 bundle[wire_key] = p.read_text(encoding="utf-8", errors="replace")

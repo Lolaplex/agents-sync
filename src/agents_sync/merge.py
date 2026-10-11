@@ -125,6 +125,9 @@ def merge_file_content(
     if rel_path.endswith("identity.json"):
         return merge_json_identity(loc, rem)
 
+    if rel_path.endswith(".jsonl"):
+        return merge_jsonl(loc, rem)
+
     if rel_path.endswith(".md") or rel_path.endswith(".mdc"):
         return merge_markdown(loc, rem, tombstoned_bullets=tombstoned_bullets)
 
@@ -132,3 +135,40 @@ def merge_file_content(
     if remote_stamp and local_stamp and remote_stamp > local_stamp:
         return rem
     return loc
+
+
+def merge_jsonl(local_text: str, remote_text: str) -> str:
+    """Merge JSONL event streams preserving chronology and deduping events."""
+    if local_text == remote_text:
+        return local_text
+
+    events_by_id: dict[str, tuple[str, dict[str, Any]]] = {}
+
+    def process(text: str):
+        for line in text.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                data = json.loads(line_str)
+                ts = data.get("ts", "")
+                session = data.get("session", "")
+                tool = data.get("tool", "")
+                etype = data.get("type", "")
+                key = f"{ts}:{session}:{etype}:{tool}:{line_str}"
+                events_by_id[key] = (ts, data)
+            except Exception:
+                events_by_id[line_str] = ("", {"raw": line_str})
+
+    process(local_text)
+    process(remote_text)
+
+    sorted_events = sorted(events_by_id.values(), key=lambda item: item[0])
+    out_lines = []
+    for _, ev in sorted_events:
+        if "raw" in ev and len(ev) == 1:
+            out_lines.append(ev["raw"])
+        else:
+            out_lines.append(json.dumps(ev, ensure_ascii=False))
+
+    return "\n".join(out_lines).strip() + "\n"
