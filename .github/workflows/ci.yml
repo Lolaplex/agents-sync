@@ -1,0 +1,72 @@
+name: CI Test Matrix
+
+on:
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }} - Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        # Fast test on PR to dev; full cross-platform matrix on release PR to main
+        os: ${{ github.base_ref == 'main' && fromJSON('["ubuntu-latest","windows-latest","macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        python-version: ${{ github.base_ref == 'main' && fromJSON('["3.10","3.11","3.12","3.13"]') || fromJSON('["3.12"]') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install build tools & dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+          pip install -e ".[server]"
+
+      - name: Run test suite
+        timeout-minutes: 10
+        run: python -m unittest discover tests
+
+  notify-failure:
+    name: Notify CI Failure
+    needs: [test]
+    if: ${{ failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Post error to CI webhook
+        env:
+          WEBHOOK_URL: ${{ secrets.CI_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::warning::CI_WEBHOOK_URL unset; skip notification"
+            exit 0
+          fi
+          python3 -c "
+          import os, json, urllib.request
+          ref = os.environ.get('GITHUB_HEAD_REF') or os.environ.get('GITHUB_REF_NAME')
+          run_url = f\"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}\"
+          payload = {
+              'embeds': [{
+                  'title': f\"🚨 CI Test Failure on \`{ref}\`\",
+                  'description': f\"**{os.environ['GITHUB_WORKFLOW']}** failed for commit \`{os.environ['GITHUB_SHA'][:7]}\`\n[View Actions Run]({run_url})\",
+                  'color': 15158332
+              }]
+          }
+          req = urllib.request.Request(os.environ['WEBHOOK_URL'], 
+                                       data=json.dumps(payload).encode(), 
+                                       headers={'Content-Type': 'application/json', 'User-Agent': 'GitHub-Actions'})
+          urllib.request.urlopen(req)
+          "
