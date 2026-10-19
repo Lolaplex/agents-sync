@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 ### Security
+- The cloud server no longer accepts the bearer token on the command line (`serve --token`). Set `AGENTS_SYNC_TOKEN` in the environment. The Docker entrypoint does not copy that value into process arguments.
 
 ## [0.1.0] - 2026-10-11
 

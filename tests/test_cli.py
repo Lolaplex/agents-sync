@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,25 @@ class TestCLI(unittest.TestCase):
                 ret_disc = main(["disconnect"])
                 self.assertEqual(ret_disc, 0)
                 self.assertFalse(self.cfg_file.exists())
+
+    def test_serve_rejects_token_on_argv(self):
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["serve", "8765", "--token", "secret123"])
+
+    def test_serve_starts_without_token_flag(self):
+        with patch("agents_sync.server.run_server") as run:
+            ret = main(["serve", "9", "--host", "127.0.0.1"])
+        self.assertEqual(ret, 0)
+        run.assert_called_once_with(port=9, host="127.0.0.1")
+
+    def test_server_token_comes_from_env(self):
+        from agents_sync.server import resolve_server_token
+
+        with patch.dict(os.environ, {"AGENTS_SYNC_TOKEN": "env-token"}, clear=False):
+            self.assertEqual(resolve_server_token(None), "env-token")
+            self.assertEqual(resolve_server_token(""), "env-token")
+        with patch.dict(os.environ, {"AGENTS_SYNC_TOKEN": ""}, clear=False):
+            self.assertEqual(resolve_server_token("kept"), "kept")
 
 
 if __name__ == "__main__":

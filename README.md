@@ -30,5 +30,6 @@ agents-sync sync
 
 # Run the cloud server on VPS
 pip install "agents-sync[server]"
-agents-sync serve 8765 --token YOUR_TOKEN
+# Token is AGENTS_SYNC_TOKEN in the environment, not a command-line flag.
+agents-sync serve 8765
 ```

@@ -11,6 +11,10 @@ from .protocol import EP_HEALTH, EP_MERGE, EP_SNAPSHOT, EP_STATUS, PROTOCOL_VERS
 from .tombstones import load_tombstones, merge_tombstones, save_tombstones
 
 
+def resolve_server_token(secret_token: Optional[str] = None) -> str:
+    return secret_token or os.environ.get("AGENTS_SYNC_TOKEN", "")
+
+
 def get_server_vault_dir() -> Path:
     env_dir = os.environ.get("AGENTS_SYNC_VAULT_DIR")
     if env_dir:
@@ -27,7 +31,7 @@ def create_app(vault_dir: Optional[Path] = None, secret_token: Optional[str] = N
 
     root = (vault_dir or get_server_vault_dir()).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    expected_token = secret_token or os.environ.get("AGENTS_SYNC_TOKEN", "")
+    expected_token = resolve_server_token(secret_token)
 
     app = FastAPI(title="agents-sync-cloud", version=PROTOCOL_VERSION)
 
