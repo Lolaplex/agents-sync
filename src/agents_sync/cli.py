@@ -53,7 +53,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv = sub.add_parser("serve", help="Run cloud server on VPS")
     p_srv.add_argument("port", nargs="?", type=int, default=8765, help="Port (default: 8765)")
     p_srv.add_argument("--host", default="0.0.0.0", help="Host address (default: 0.0.0.0)")
-    p_srv.add_argument("--token", help="Secret token required for clients")
 
     return parser
 
@@ -145,7 +144,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from .server import run_server
 
         print(f"Starting agents-sync server on {args.host}:{args.port}...")
-        run_server(port=args.port, host=args.host, token=args.token)
+        run_server(port=args.port, host=args.host)
         return 0
 
     return 0

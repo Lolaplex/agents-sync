@@ -40,6 +40,7 @@ class DomainSpec:
 # Registered syncable domains under ~/.agents
 DOMAINS: Dict[str, DomainSpec] = {
     "memory": DomainSpec("memory", "memory", is_file=False),
+    "rules": DomainSpec("rules", "rules", is_file=False),
     "skills": DomainSpec("skills", "skills", is_file=False),
     "docs": DomainSpec("docs", "docs", is_file=False),
     "identity": DomainSpec("identity", "identity.json", is_file=True),
