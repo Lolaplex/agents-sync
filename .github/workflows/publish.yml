@@ -58,14 +58,15 @@ jobs:
             echo "::warning::RELEASE_WEBHOOK_URL unset; skip notification"
             exit 0
           fi
-          python3 -c "
-          import os, json, urllib.request, re
+          PAYLOAD=$(python3 <<'PY'
+          import os, json, re
           tag = os.environ.get('GITHUB_REF_NAME', '')
           repo = os.environ.get('GITHUB_REPOSITORY', '')
-          release_url = f\"https://github.com/{repo}/releases/tag/{tag}\"
-          pypi_url = f\"https://pypi.org/project/{repo.split('/')[-1]}/{tag.lstrip('v')}/\"
-          
-          # Extract release notes from CHANGELOG.md if present
+          server = os.environ.get('GITHUB_SERVER_URL', 'https://github.com')
+          repo_url = f'{server}/{repo}'
+          release_url = f"{repo_url}/releases/tag/{tag}"
+          pypi_url = f"https://pypi.org/project/{repo.split('/')[-1]}/{tag.lstrip('v')}/"
+
           notes = 'Lockstep release published successfully.'
           try:
               with open('CHANGELOG.md') as f:
@@ -76,42 +77,27 @@ jobs:
                   notes = match.group(1).strip()[:1800]
           except Exception:
               pass
-              
-          payload = {
+
+          print(json.dumps({
               'embeds': [{
-                  'title': f\"🚀 Release {tag} Published!\",
-                  'description': f\"**{repo}** is live on PyPI and GitHub Releases.\n\n{notes}\n\n[GitHub Release]({release_url}) | [PyPI]({pypi_url})\",
+                  'title': f'🚀 Release {tag} Published! — {repo}',
+                  'url': release_url,
+                  'description': f'**{repo}** is live on PyPI and GitHub Releases.\n\n{notes}\n\n[GitHub Release]({release_url}) · [PyPI]({pypi_url}) · [Repository]({repo_url})',
                   'color': 5763719
               }]
-          }
-          req = urllib.request.Request(os.environ['WEBHOOK_URL'], 
-                                       data=json.dumps(payload).encode(), 
-                                       headers={'Content-Type': 'application/json', 'User-Agent': 'GitHub-Actions'})
-          urllib.request.urlopen(req)
-          "
+          }))
+          PY
+          )
+          curl -fsS -X POST -H 'Content-Type: application/json' -d "$PAYLOAD" "$WEBHOOK_URL"
 
       - name: Notify Release Failure
         if: failure()
         env:
-          WEBHOOK_URL: ${{ secrets.CI_WEBHOOK_URL }}
+          CI_WEBHOOK_URL: ${{ secrets.CI_WEBHOOK_URL }}
         run: |
-          if [ -z "$WEBHOOK_URL" ]; then
+          if [ -z "$CI_WEBHOOK_URL" ]; then
             echo "::warning::CI_WEBHOOK_URL unset; skip notification"
             exit 0
           fi
-          python3 -c "
-          import os, json, urllib.request
-          tag = os.environ.get('GITHUB_REF_NAME', '')
-          run_url = f\"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}\"
-          payload = {
-              'embeds': [{
-                  'title': f\"❌ Release Publish Failed: {tag}\",
-                  'description': f\"Failed to publish package for \`{tag}\`\n[View Actions Run]({run_url})\",
-                  'color': 15158332
-              }]
-          }
-          req = urllib.request.Request(os.environ['WEBHOOK_URL'], 
-                                       data=json.dumps(payload).encode(), 
-                                       headers={'Content-Type': 'application/json', 'User-Agent': 'GitHub-Actions'})
-          urllib.request.urlopen(req)
-          "
+          PAYLOAD=$(python3 -c "import json, os; repo=os.environ['GITHUB_REPOSITORY']; server=os.environ['GITHUB_SERVER_URL']; repo_url=f'{server}/{repo}'; ref=os.environ.get('GITHUB_REF_NAME', ''); run_url=f'{server}/{repo}/actions/runs/{os.environ[\"GITHUB_RUN_ID\"]}'; print(json.dumps({'embeds':[{'title':f'🔴 Release Failure: {repo}','url':run_url,'description':f\"Failed to publish \`{ref}\`\\n[View run]({run_url}) · [Repository]({repo_url})\",'color':15158332}]}))")
+          curl -fsS -X POST -H 'Content-Type: application/json' -d "$PAYLOAD" "$CI_WEBHOOK_URL"
