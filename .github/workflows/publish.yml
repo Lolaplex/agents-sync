@@ -1,103 +1,131 @@
-name: Release & Publish
+name: Release
+
+# A merge to main is a release. The version in pyproject.toml decides what
+# ships: when that version is already on PyPI the job is a no-op, so merging a
+# change that does not bump the version is harmless.
+#
+# PyPI publishing uses Trusted Publishing (OIDC), so no token is stored here.
+# One-time setup per project on pypi.org:
+#   Publishing -> Add a new pending publisher -> GitHub
+#   owner: Lolaplex, repository: <this repo>, workflow: publish.yml
+# If a project has no trusted publisher, add a PYPI_API_TOKEN secret and pass
+# `password: ${{ secrets.PYPI_API_TOKEN }}` to the publish step instead.
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
-  release:
-    types: [published]
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
-  group: publish-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Build, Release & Publish
+  release:
+    name: Build, tag and publish
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
-      contents: write       # For GitHub Release creation
-      id-token: write       # For PyPI Trusted Publishing
+      contents: write      # tag and GitHub release
+      id-token: write      # PyPI trusted publishing
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install build & packaging tools
+      - name: Read name and version from pyproject.toml
+        id: meta
         run: |
-          python -m pip install --upgrade pip
-          pip install build twine
+          python -c "import pathlib,tomllib;p=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project'];print('name='+p['name']);print('version='+p['version']);print('tag=v'+p['version'])" >> "$GITHUB_OUTPUT"
 
-      - name: Build source and binary distribution
+      - name: Is this version already on PyPI?
+        id: check
+        run: |
+          url="https://pypi.org/pypi/${{ steps.meta.outputs.name }}/${{ steps.meta.outputs.version }}/json"
+          if curl -fsS -o /dev/null "$url"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.meta.outputs.name }} ${{ steps.meta.outputs.version }} is already on PyPI. Nothing to publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build tools
+        if: steps.check.outputs.exists == 'false'
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build
+        if: steps.check.outputs.exists == 'false'
         run: python -m build
 
-      - name: Validate distribution metadata
-        run: twine check dist/*
-
-      - name: Create or Update GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          generate_release_notes: true
-          draft: false
-          prerelease: false
+      - name: Check metadata
+        if: steps.check.outputs.exists == 'false'
+        run: python -m twine check dist/*
 
       - name: Publish to PyPI
+        if: steps.check.outputs.exists == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Notify Release Published
-        if: success()
+      - name: Tag and create the GitHub release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.meta.outputs.tag }}" >/dev/null; then
+            echo "::notice::tag ${{ steps.meta.outputs.tag }} already exists"
+          else
+            gh release create "${{ steps.meta.outputs.tag }}" --target "${{ github.sha }}" --title "${{ steps.meta.outputs.tag }}" --generate-notes
+          fi
+
+      - name: Notify release
+        if: success() && steps.check.outputs.exists == 'false'
+        continue-on-error: true
         env:
           WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
+          PKG: ${{ steps.meta.outputs.name }}
+          VER: ${{ steps.meta.outputs.version }}
         run: |
           if [ -z "$WEBHOOK_URL" ]; then
             echo "::warning::RELEASE_WEBHOOK_URL unset; skip notification"
             exit 0
           fi
-          PAYLOAD=$(python3 <<'PY'
-          import os, json, re
-          tag = os.environ.get('GITHUB_REF_NAME', '')
-          repo = os.environ.get('GITHUB_REPOSITORY', '')
-          server = os.environ.get('GITHUB_SERVER_URL', 'https://github.com')
-          repo_url = f'{server}/{repo}'
-          release_url = f"{repo_url}/releases/tag/{tag}"
-          pypi_url = f"https://pypi.org/project/{repo.split('/')[-1]}/{tag.lstrip('v')}/"
-
-          notes = 'Lockstep release published successfully.'
-          try:
-              with open('CHANGELOG.md') as f:
-                  content = f.read()
-              version = tag.lstrip('v')
-              match = re.search(rf'## \[{re.escape(version)}\][^\n]*\n(.*?)(?=\n## |\Z)', content, re.DOTALL)
-              if match:
-                  notes = match.group(1).strip()[:1800]
-          except Exception:
-              pass
-
-          print(json.dumps({
-              'embeds': [{
-                  'title': f'🚀 Release {tag} Published! — {repo}',
-                  'url': release_url,
-                  'description': f'**{repo}** is live on PyPI and GitHub Releases.\n\n{notes}\n\n[GitHub Release]({release_url}) · [PyPI]({pypi_url}) · [Repository]({repo_url})',
-                  'color': 5763719
-              }]
-          }))
+          python3 - <<'PY'
+          import json, os, urllib.request
+          pkg, ver = os.environ["PKG"], os.environ["VER"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          payload = {"embeds": [{
+              "title": f"🚀 {pkg} {ver} released",
+              "description": f"[PyPI](https://pypi.org/project/{pkg}/{ver}/) · [GitHub](https://github.com/{repo}/releases/tag/v{ver})",
+              "color": 5763719,
+          }]}
+          req = urllib.request.Request(os.environ["WEBHOOK_URL"], data=json.dumps(payload).encode(),
+                                       headers={"Content-Type": "application/json", "User-Agent": "GitHub-Actions"})
+          urllib.request.urlopen(req)
           PY
-          )
-          curl -fsS -X POST -H 'Content-Type: application/json' -d "$PAYLOAD" "$WEBHOOK_URL"
 
-      - name: Notify Release Failure
+      - name: Notify failure
         if: failure()
+        continue-on-error: true
         env:
-          CI_WEBHOOK_URL: ${{ secrets.CI_WEBHOOK_URL }}
+          WEBHOOK_URL: ${{ secrets.CI_WEBHOOK_URL }}
         run: |
-          if [ -z "$CI_WEBHOOK_URL" ]; then
+          if [ -z "$WEBHOOK_URL" ]; then
             echo "::warning::CI_WEBHOOK_URL unset; skip notification"
             exit 0
           fi
-          PAYLOAD=$(python3 -c "import json, os; repo=os.environ['GITHUB_REPOSITORY']; server=os.environ['GITHUB_SERVER_URL']; repo_url=f'{server}/{repo}'; ref=os.environ.get('GITHUB_REF_NAME', ''); run_url=f'{server}/{repo}/actions/runs/{os.environ[\"GITHUB_RUN_ID\"]}'; print(json.dumps({'embeds':[{'title':f'🔴 Release Failure: {repo}','url':run_url,'description':f\"Failed to publish \`{ref}\`\\n[View run]({run_url}) · [Repository]({repo_url})\",'color':15158332}]}))")
-          curl -fsS -X POST -H 'Content-Type: application/json' -d "$PAYLOAD" "$CI_WEBHOOK_URL"
+          python3 - <<'PY'
+          import json, os, urllib.request
+          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          payload = {"embeds": [{
+              "title": f"❌ Release failed: {os.environ['GITHUB_REPOSITORY']}",
+              "description": f"[View run]({run_url})",
+              "color": 15158332,
+          }]}
+          req = urllib.request.Request(os.environ["WEBHOOK_URL"], data=json.dumps(payload).encode(),
+                                       headers={"Content-Type": "application/json", "User-Agent": "GitHub-Actions"})
+          urllib.request.urlopen(req)
+          PY
