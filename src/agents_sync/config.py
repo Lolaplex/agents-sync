@@ -9,15 +9,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
 
+from agents_workspace import Workspace
+
 DEFAULT_DOMAINS = ["memory", "skills", "docs", "identity", "traces", "known_dids"]
 
 
 def get_agents_dir() -> Path:
-    """Return the root ~/.agents directory (or AGENTS_DIR env override)."""
+    """Return the workspace root (or AGENTS_DIR env override)."""
     env_dir = os.environ.get("AGENTS_DIR")
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    return (Path.home() / ".agents").resolve()
+    return Workspace.from_env().root
 
 
 def get_config_path() -> Path:
