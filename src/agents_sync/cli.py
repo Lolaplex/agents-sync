@@ -21,7 +21,7 @@ from .config import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agents-sync",
-        description="Unified multi-device cloud synchronizer for ~/.agents (memory, skills, docs, traces, identity).",
+        description="Unified multi-device synchronizer for workspace domains (memory, skills, rules, traces).",
     )
     sub = parser.add_subparsers(dest="command", required=False)
 
@@ -94,7 +94,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command == "status":
         print(f"Node ID:          {cfg.node_id}")
-        print(f"Agents Home:      {get_agents_dir()}")
+        print(f"Workspace:        {get_agents_dir()}")
         print(f"Connected:        {'Yes' if cfg.is_connected() else 'No'}")
         if cfg.is_connected():
             print(f"Remote URL:       {cfg.url}")

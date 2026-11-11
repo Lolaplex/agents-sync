@@ -17,7 +17,7 @@
 > [!NOTE]
 > **Stack-Wide Sync vs Legacy Memory Sync:**
 > Cloud synchronization was originally coupled inside `agents-memory`. To support modern multi-device development workflows, VPS services, and cloud agent environments, sync has been completely extracted into this dedicated standalone package (`agents-sync`).
-> `agents-sync` unifies state across all sub-domains of `~/.agents` (`memory`, `skills`, `docs`, `rules`, `identity`, `traces`, `known-dids`), providing a single source of truth across all your machines.
+> `agents-sync` unifies workspace domains (`memory`, `skills`, `rules`, `traces`) across all your machines. Host-only data (keys, DIDs, `users.json`) never syncs.
 
 ---
 
@@ -25,13 +25,10 @@
 
 | Domain | Path | Sync Strategy |
 |---|---|---|
-| **Memory** | `~/.agents/memory/` | 3-way markdown merge with bullet-level tombstone tracking (`.tombstones.json`). |
-| **Skills** | `~/.agents/skills/` | Mirror active agent workflows and skills across all workstations. |
-| **Docs** | `~/.agents/docs/` | Mirror technical platform documentation and reference sheets. |
-| **Rules** | `~/.agents/rules/` | Sync global agent rule definitions. |
-| **Identity** | `~/.agents/identity.json` | Deterministic merge for user, session, and alias mappings. |
-| **Traces** | `~/.agents/traces/` | Append-only chronological event stream merging with timestamp deduplication. |
-| **Known DIDs** | `~/.agents/known-dids.jsonl` | Append-only public keys of verified peers and agents. |
+| **Memory** | `<ws>/memory/` | 3-way markdown merge with bullet-level tombstone tracking (`.tombstones.json`). |
+| **Skills** | `<ws>/skills/` | Mirror active agent workflows and skills across all workstations. |
+| **Rules** | `<ws>/rules/` | Sync global agent rule definitions. |
+| **Traces** | `<ws>/traces/` | Append-only chronological event stream merging with timestamp deduplication. |
 
 ### Security & Key Isolation
 > [!IMPORTANT]
