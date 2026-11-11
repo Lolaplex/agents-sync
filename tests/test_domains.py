@@ -31,7 +31,6 @@ class TestDomains(unittest.TestCase):
         root = Path("/tmp/agents")
         self.assertEqual(get_domain_root(root, "memory"), root / "memory")
         self.assertEqual(get_domain_root(root, "skills"), root / "skills")
-        self.assertEqual(get_domain_root(root, "identity"), root / "identity.json")
 
 
 if __name__ == "__main__":

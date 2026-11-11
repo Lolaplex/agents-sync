@@ -57,3 +57,23 @@ class TestCLI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHostConfig(unittest.TestCase):
+    def test_domains_are_workspace_only(self):
+        from agents_sync.domains import DOMAINS
+        self.assertEqual(set(DOMAINS), {"memory", "rules", "skills", "traces"})
+
+    def test_agents_dir_env_ignored(self):
+        import os, tempfile
+        from unittest.mock import patch
+        from agents_sync.config import get_agents_dir
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AGENTS_DIR": tmp, "AGENTS_HOST_DIR": tempfile.mkdtemp()}):
+                self.assertNotEqual(str(get_agents_dir()), tmp)
+
+    def test_missing_host_base_root_errors(self):
+        from agents_sync.config import SyncConfig
+        with self.assertRaises(RuntimeError) as ctx:
+            SyncConfig().require_host_base_root()
+        self.assertIn("agents.json", str(ctx.exception))

@@ -37,15 +37,14 @@ class DomainSpec:
         self.is_file = is_file
 
 
-# Registered syncable domains under ~/.agents
+# Registered syncable workspace domains
 DOMAINS: Dict[str, DomainSpec] = {
     "memory": DomainSpec("memory", "memory", is_file=False),
     "rules": DomainSpec("rules", "rules", is_file=False),
     "skills": DomainSpec("skills", "skills", is_file=False),
-    "docs": DomainSpec("docs", "docs", is_file=False),
-    "identity": DomainSpec("identity", "identity.json", is_file=True),
+
     "traces": DomainSpec("traces", "traces", is_file=False),
-    "known_dids": DomainSpec("known_dids", "known-dids.jsonl", is_file=True),
+
 }
 
 
