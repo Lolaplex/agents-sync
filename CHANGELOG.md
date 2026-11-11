@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- README describes workspace-domain sync (Host > Workspace, `<host>/keys`); no `~/.agents` ecosystem wording outside migration notes.
+
+### Changed
 - Workspace resolves via `agents-workspace` (`AGENTS_WORKSPACE`); `AGENTS_DIR` removed (breaking).
 - Syncable domains are workspace domains only: `memory`, `skills`, `rules`, `traces`. `docs`, `identity`, `known_dids` dropped (host-only or gone).
 - `sync_config.json` stays at workspace level; env `AGENTS_SYNC_CONFIG_FILE` (`AGENTS_SYNC_CONFIG` deprecated alias).
