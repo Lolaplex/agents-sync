@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <strong>Unified multi-device cloud synchronizer for the entire <code>~/.agents</code> ecosystem.</strong><br>
+  <strong>Unified multi-device synchronizer for agents workspaces (<code>Host &gt; Workspace</code>).</strong><br>
   Zero heavy client dependencies. Standalone sync engine decoupling and replacing legacy memory-only sync.
 </p>
 
@@ -32,7 +32,7 @@
 
 ### Security & Key Isolation
 > [!IMPORTANT]
-> **Strict Host Key Isolation:** Private Ed25519 agent keys located in `~/.agents/keys/*.ed25519` are hard-blocked from bundle collection and synchronization. Private keys never leave the local machine.
+> **Strict Host Key Isolation:** Private Ed25519 agent keys located in `<host>/keys/*.ed25519` are hard-blocked from bundle collection and synchronization. Private keys never leave the local machine.
 
 ---
 
