@@ -20,6 +20,12 @@ FORBIDDEN_NAMES: Set[str] = {
     "board_attach.json",
     "host_paths.json",
     ".sync.lock",
+    "secrets.json",
+    ".env",
+    "calendar.json",
+    "vapid.json",
+    "remotes.json",
+    "push.json",
 }
 
 FORBIDDEN_PARTS: Set[str] = {
@@ -27,6 +33,7 @@ FORBIDDEN_PARTS: Set[str] = {
     ".git",
     "__pycache__",
     "keys",  # Whole ~/.agents/keys directory is blocked except known-dids.jsonl
+    "secrets",
 }
 
 

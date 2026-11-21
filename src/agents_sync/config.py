@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
 
-from agents_workspace import Workspace
+from agents_workspace import Host, Workspace
 
 DEFAULT_DOMAINS = ["memory", "skills", "traces"]
 
 
 def get_agents_dir() -> Path:
     """Return the active workspace root via the resolver."""
-    return Workspace.from_env().root
+    return Workspace.from_env().dir
 
 
 def get_config_path() -> Path:
@@ -37,7 +37,7 @@ def get_config_path() -> Path:
 
 def get_host_config() -> dict[str, Any]:
     """Host-level config from <host>/agents.json."""
-    path = Workspace.from_env().host.agents_json
+    path = Host.from_env().agents_json
     if not path.is_file():
         return {}
     try:
@@ -48,7 +48,7 @@ def get_host_config() -> dict[str, Any]:
 
 
 def save_host_config(data: dict[str, Any]) -> Path:
-    path = Workspace.from_env().host.agents_json
+    path = Host.from_env().agents_json
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path

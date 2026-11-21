@@ -77,3 +77,16 @@ class TestHostConfig(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             SyncConfig().require_host_base_root()
         self.assertIn("agents.json", str(ctx.exception))
+
+    def test_host_config_uses_host_not_workspace(self):
+        from agents_workspace import Host
+        from agents_sync.config import get_host_config, save_host_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AGENTS_HOST_DIR": tmp}
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("AGENTS_WORKSPACE", None)
+                Host.from_env().create("alpha")
+                Host.from_env().create("beta")
+                save_host_config({"node_id": "n-host"})
+                self.assertEqual(get_host_config()["node_id"], "n-host")
