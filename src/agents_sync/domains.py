@@ -34,6 +34,7 @@ FORBIDDEN_PARTS: Set[str] = {
     "__pycache__",
     "keys",  # Whole ~/.agents/keys directory is blocked except known-dids.jsonl
     "secrets",
+    "run",  # Ephemeral <ws>/run state (delegates, procs, locks) must never sync
 }
 
 

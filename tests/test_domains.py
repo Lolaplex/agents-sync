@@ -33,6 +33,12 @@ class TestDomains(unittest.TestCase):
         self.assertFalse(is_path_safe("secrets/token.txt"))
         self.assertFalse(is_path_safe("memory/secrets/a.md"))
 
+    def test_run_dir_blocked(self):
+        self.assertFalse(is_path_safe("run/delegates/dlg_1/meta.json"))
+        self.assertFalse(is_path_safe("run/procs/proc_1/out.log"))
+        self.assertFalse(is_path_safe("run/delegate.depth"))
+        self.assertFalse(is_path_safe("memory/run/ephemeral.txt"))
+
     def test_allowed_domains_safe(self):
         self.assertTrue(is_path_safe("memory/notes/idea.md"))
         self.assertTrue(is_path_safe("skills/caveman/SKILL.md"))
