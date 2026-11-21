@@ -1,8 +1,11 @@
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from agents_workspace import Host, doctor, resolve_secret
 
 from agents_sync.cli import main, build_parser
 from agents_sync.config import load_config, save_config, SyncConfig
@@ -12,8 +15,21 @@ class TestCLI(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg_file = Path(self.tmp.name) / "sync_config.json"
+        self._env = patch.dict(
+            os.environ,
+            {
+                "AGENTS_HOST_DIR": self.tmp.name,
+                "AGENTS_SYNC_TOKEN": "",
+                "AGENTS_SECRETS_ORDER": "",
+            },
+            clear=False,
+        )
+        self._env.start()
+        os.environ.pop("AGENTS_WORKSPACE", None)
+        os.environ.pop("AGENTS_SYNC_CONFIG_FILE", None)
 
     def tearDown(self):
+        self._env.stop()
         self.tmp.cleanup()
 
     def test_parser_options(self):
@@ -26,14 +42,86 @@ class TestCLI(unittest.TestCase):
             with patch("agents_sync.cli.check_health", return_value=True):
                 ret = main(["connect", "https://vps.example.com:8765", "--token", "secret123"])
                 self.assertEqual(ret, 0)
+                raw = self.cfg_file.read_text(encoding="utf-8")
+                self.assertNotIn("secret123", raw)
+                self.assertNotIn("token", json.loads(raw))
                 cfg = load_config()
                 self.assertEqual(cfg.url, "https://vps.example.com:8765")
                 self.assertEqual(cfg.token, "secret123")
+                self.assertEqual(resolve_secret("AGENTS_SYNC_TOKEN"), "secret123")
 
                 # Disconnect
                 ret_disc = main(["disconnect"])
                 self.assertEqual(ret_disc, 0)
                 self.assertFalse(self.cfg_file.exists())
+                self.assertEqual(load_config().token, "")
+
+    def test_multi_workspace_tokens_isolated(self):
+        host = Host.open(self.tmp.name)
+        ws_a = host.create("alpha")
+        ws_b = host.create("beta")
+
+        with patch("agents_sync.cli.check_health", return_value=True):
+            with patch.dict(os.environ, {"AGENTS_WORKSPACE": "alpha"}):
+                self.assertEqual(
+                    main(["connect", "https://a.example", "--token", "tok-alpha"]), 0
+                )
+            with patch.dict(os.environ, {"AGENTS_WORKSPACE": "beta"}):
+                self.assertEqual(
+                    main(["connect", "https://b.example", "--token", "tok-beta"]), 0
+                )
+
+        self.assertNotIn("token", json.loads(ws_a.sync_config.read_text(encoding="utf-8")))
+        self.assertNotIn("token", json.loads(ws_b.sync_config.read_text(encoding="utf-8")))
+
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "alpha"}):
+            cfg_a = load_config()
+            self.assertEqual(cfg_a.url, "https://a.example")
+            self.assertEqual(cfg_a.token, "tok-alpha")
+
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "beta"}):
+            cfg_b = load_config()
+            self.assertEqual(cfg_b.url, "https://b.example")
+            self.assertEqual(cfg_b.token, "tok-beta")
+
+        sync_issues = [
+            i for i in doctor(host)["issues"]
+            if "sync_config" in i["path"] or "token" in i["message"].lower()
+        ]
+        self.assertEqual(sync_issues, [])
+
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "alpha"}):
+            self.assertEqual(main(["disconnect"]), 0)
+            self.assertEqual(load_config().token, "")
+
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "beta"}):
+            self.assertEqual(load_config().token, "tok-beta")
+
+    def test_legacy_sync_config_token_fallback_and_strip_on_save(self):
+        host = Host.open(self.tmp.name)
+        ws = host.create("default")
+        ws.sync_config.write_text(
+            json.dumps({"url": "https://legacy.example", "token": "legacy-tok"}),
+            encoding="utf-8",
+        )
+        loaded = load_config()
+        self.assertEqual(loaded.token, "legacy-tok")
+
+        with patch.dict(
+            os.environ,
+            {"AGENTS_SYNC_TOKEN": "env-tok", "AGENTS_SECRETS_ORDER": "env-first"},
+        ):
+            self.assertEqual(load_config().token, "env-tok")
+
+        save_config(loaded)
+        disk = json.loads(ws.sync_config.read_text(encoding="utf-8"))
+        self.assertNotIn("token", disk)
+        self.assertEqual(load_config().token, "legacy-tok")
+        sync_issues = [
+            i for i in doctor(host)["issues"]
+            if "sync_config" in i["path"] or "token" in i["message"].lower()
+        ]
+        self.assertEqual(sync_issues, [])
 
     def test_serve_rejects_token_on_argv(self):
         with self.assertRaises(SystemExit):

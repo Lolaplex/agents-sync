@@ -9,9 +9,53 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
 
-from agents_workspace import Host, Workspace
+from agents_workspace import (
+    ENV_SECRETS_ORDER,
+    Host,
+    Workspace,
+    delete_secret,
+    resolve_secret,
+    secrets_ws_file,
+    write_secret,
+)
 
 DEFAULT_DOMAINS = ["memory", "skills", "traces"]
+
+
+def _current_workspace() -> Optional[Workspace]:
+    try:
+        return Workspace.from_env()
+    except ValueError:
+        return None
+
+
+def _read_ws_vault_token(ws: Workspace) -> str:
+    path = secrets_ws_file(ws)
+    if not path.is_file():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    val = data.get("AGENTS_SYNC_TOKEN")
+    return val.strip() if isinstance(val, str) and val.strip() else ""
+
+
+def _resolve_sync_token(legacy_token: str = "") -> str:
+    ws = _current_workspace()
+    clean_legacy = (legacy_token or "").strip()
+    order = os.environ.get(ENV_SECRETS_ORDER, "").strip().lower()
+    if order == "env-first":
+        return resolve_secret("AGENTS_SYNC_TOKEN", ws=ws).strip() or clean_legacy
+    if clean_legacy:
+        if ws is not None:
+            ws_tok = _read_ws_vault_token(ws)
+            if ws_tok:
+                return ws_tok
+        return clean_legacy
+    return resolve_secret("AGENTS_SYNC_TOKEN", ws=ws).strip()
 
 
 def get_agents_dir() -> Path:
@@ -68,7 +112,6 @@ class SyncConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "url": self.url,
-            "token": self.token,
             "enabled_domains": self.enabled_domains,
         }
 
@@ -90,9 +133,10 @@ class SyncConfig:
                 save_host_config(host)
             except OSError:
                 pass
+        legacy_token = str(data.get("token") or "").strip()
         return cls(
             url=data.get("url", ""),
-            token=data.get("token", ""),
+            token=_resolve_sync_token(legacy_token),
             node_id=node_id,
             enabled_domains=list(data.get("enabled_domains") or DEFAULT_DOMAINS),
             host_base_root=str(host.get("host_base_root") or ""),
@@ -108,32 +152,47 @@ def load_config() -> SyncConfig:
         if mem_cfg.is_file():
             try:
                 data = json.loads(mem_cfg.read_text(encoding="utf-8"))
-                return SyncConfig(
-                    url=data.get("remote_url", ""),
-                    token=data.get("token", ""),
+                return SyncConfig.from_dict(
+                    {
+                        "url": data.get("remote_url", ""),
+                        "token": data.get("token", ""),
+                    }
                 )
             except Exception:
                 pass
-        return SyncConfig()
+        return SyncConfig(token=_resolve_sync_token())
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return SyncConfig.from_dict(data)
     except Exception:
-        return SyncConfig()
+        return SyncConfig(token=_resolve_sync_token())
 
 
 def save_config(config: SyncConfig) -> Path:
-    """Save config to sync_config.json."""
+    """Save non-secret config to sync_config.json and token to Host Secret Vault."""
     path = get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config.to_dict(), indent=2) + "\n", encoding="utf-8")
+    clean_token = (config.token or "").strip()
+    if clean_token:
+        ws = _current_workspace()
+        if ws is not None:
+            write_secret("AGENTS_SYNC_TOKEN", clean_token, ws=ws, scope="workspace")
+        else:
+            write_secret("AGENTS_SYNC_TOKEN", clean_token, scope="host")
     return path
 
 
 def clear_config() -> bool:
-    """Remove sync_config.json."""
+    """Remove sync_config.json and delete the workspace sync token from the vault."""
+    removed = False
     path = get_config_path()
     if path.is_file():
         path.unlink()
-        return True
-    return False
+        removed = True
+    ws = _current_workspace()
+    if ws is not None:
+        removed = delete_secret("AGENTS_SYNC_TOKEN", ws=ws, scope="workspace") or removed
+    else:
+        removed = delete_secret("AGENTS_SYNC_TOKEN", scope="host") or removed
+    return removed
