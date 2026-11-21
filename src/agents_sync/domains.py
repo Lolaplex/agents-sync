@@ -20,6 +20,12 @@ FORBIDDEN_NAMES: Set[str] = {
     "board_attach.json",
     "host_paths.json",
     ".sync.lock",
+    "secrets.json",
+    ".env",
+    "calendar.json",
+    "vapid.json",
+    "remotes.json",
+    "push.json",
 }
 
 FORBIDDEN_PARTS: Set[str] = {
@@ -27,6 +33,8 @@ FORBIDDEN_PARTS: Set[str] = {
     ".git",
     "__pycache__",
     "keys",  # Whole ~/.agents/keys directory is blocked except known-dids.jsonl
+    "secrets",
+    "run",  # Ephemeral <ws>/run state (delegates, procs, locks) must never sync
 }
 
 
@@ -42,9 +50,8 @@ DOMAINS: Dict[str, DomainSpec] = {
     "memory": DomainSpec("memory", "memory", is_file=False),
     "rules": DomainSpec("rules", "rules", is_file=False),
     "skills": DomainSpec("skills", "skills", is_file=False),
-
     "traces": DomainSpec("traces", "traces", is_file=False),
-
+    "members": DomainSpec("members", "members.json", is_file=True),
 }
 
 

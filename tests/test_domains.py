@@ -19,6 +19,26 @@ class TestDomains(unittest.TestCase):
         self.assertFalse(is_path_safe("sync_config.json"))
         self.assertFalse(is_path_safe("remote_config.json"))
 
+    def test_secrets_and_control_files_blocked(self):
+        for name in (
+            "secrets.json",
+            ".env",
+            "calendar.json",
+            "vapid.json",
+            "remotes.json",
+            "push.json",
+        ):
+            self.assertFalse(is_path_safe(name), name)
+            self.assertFalse(is_path_safe(f"memory/{name}"), name)
+        self.assertFalse(is_path_safe("secrets/token.txt"))
+        self.assertFalse(is_path_safe("memory/secrets/a.md"))
+
+    def test_run_dir_blocked(self):
+        self.assertFalse(is_path_safe("run/delegates/dlg_1/meta.json"))
+        self.assertFalse(is_path_safe("run/procs/proc_1/out.log"))
+        self.assertFalse(is_path_safe("run/delegate.depth"))
+        self.assertFalse(is_path_safe("memory/run/ephemeral.txt"))
+
     def test_allowed_domains_safe(self):
         self.assertTrue(is_path_safe("memory/notes/idea.md"))
         self.assertTrue(is_path_safe("skills/caveman/SKILL.md"))

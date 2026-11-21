@@ -76,6 +76,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         new_cfg = SyncConfig(
             url=args.url.rstrip("/"),
             token=args.token,
+            node_id=cfg.node_id,
             enabled_domains=domains,
         )
         print(f"Connecting to {new_cfg.url}...")
