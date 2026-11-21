@@ -150,7 +150,38 @@ if __name__ == "__main__":
 class TestHostConfig(unittest.TestCase):
     def test_domains_are_workspace_only(self):
         from agents_sync.domains import DOMAINS
-        self.assertEqual(set(DOMAINS), {"memory", "rules", "skills", "traces"})
+        from agents_sync.config import DEFAULT_DOMAINS
+        self.assertEqual(set(DOMAINS), {"memory", "rules", "skills", "traces", "members"})
+        self.assertTrue(DOMAINS["members"].is_file)
+        self.assertEqual(DOMAINS["members"].relative_path, "members.json")
+        self.assertEqual(DEFAULT_DOMAINS, ["memory", "rules", "skills", "traces", "members"])
+
+    def test_from_dict_is_pure_and_save_config_writes_node_id(self):
+        from agents_workspace import Host
+        from agents_sync.config import get_host_config, save_host_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AGENTS_HOST_DIR": tmp}, clear=False):
+                os.environ.pop("AGENTS_WORKSPACE", None)
+                host = Host.from_env()
+                host.create("default")
+                self.assertFalse(host.agents_json.exists())
+
+                cfg = SyncConfig.from_dict({"url": "https://sync.example"})
+                self.assertFalse(host.agents_json.exists())
+                loaded = load_config()
+                self.assertFalse(host.agents_json.exists())
+
+                save_config(cfg)
+                self.assertTrue(host.agents_json.is_file())
+                self.assertEqual(get_host_config()["node_id"], cfg.node_id)
+
+                save_host_config({"node_id": "pinned-node"})
+                cfg2 = SyncConfig.from_dict({})
+                self.assertEqual(cfg2.node_id, "pinned-node")
+                save_config(SyncConfig(url="https://sync.example", node_id="other"))
+                self.assertEqual(get_host_config()["node_id"], "pinned-node")
+                self.assertEqual(loaded.enabled_domains, ["memory", "rules", "skills", "traces", "members"])
 
     def test_agents_dir_env_ignored(self):
         import os, tempfile

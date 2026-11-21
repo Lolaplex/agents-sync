@@ -19,7 +19,7 @@ from agents_workspace import (
     write_secret,
 )
 
-DEFAULT_DOMAINS = ["memory", "skills", "traces"]
+DEFAULT_DOMAINS = ["memory", "rules", "skills", "traces", "members"]
 
 
 def _current_workspace() -> Optional[Workspace]:
@@ -125,14 +125,7 @@ class SyncConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SyncConfig":
         host = get_host_config()
-        node_id = host.get("node_id")
-        if not node_id:
-            node_id = f"{platform.node().lower()}-{uuid.uuid4().hex[:6]}"
-            host["node_id"] = node_id
-            try:
-                save_host_config(host)
-            except OSError:
-                pass
+        node_id = str(host.get("node_id") or "") or f"{platform.node().lower()}-{uuid.uuid4().hex[:6]}"
         legacy_token = str(data.get("token") or "").strip()
         return cls(
             url=data.get("url", ""),
@@ -160,12 +153,12 @@ def load_config() -> SyncConfig:
                 )
             except Exception:
                 pass
-        return SyncConfig(token=_resolve_sync_token())
+        return SyncConfig.from_dict({})
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return SyncConfig.from_dict(data)
     except Exception:
-        return SyncConfig(token=_resolve_sync_token())
+        return SyncConfig.from_dict({})
 
 
 def save_config(config: SyncConfig) -> Path:
@@ -173,6 +166,10 @@ def save_config(config: SyncConfig) -> Path:
     path = get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config.to_dict(), indent=2) + "\n", encoding="utf-8")
+    host = get_host_config()
+    if not host.get("node_id") and config.node_id:
+        host["node_id"] = config.node_id
+        save_host_config(host)
     clean_token = (config.token or "").strip()
     if clean_token:
         ws = _current_workspace()

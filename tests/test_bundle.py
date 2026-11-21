@@ -21,6 +21,7 @@ class TestBundle(unittest.TestCase):
 
         (self.root / "skills" / "caveman").mkdir(parents=True)
         (self.root / "skills" / "caveman" / "SKILL.md").write_text("name: caveman", encoding="utf-8")
+        (self.root / "members.json").write_text('{"members": [{"id": "u_1", "role": "owner"}]}\n', encoding="utf-8")
 
 
         # Create forbidden key (must be skipped)
@@ -32,6 +33,7 @@ class TestBundle(unittest.TestCase):
 
         self.assertIn("memory/notes/todo.md", bundle)
         self.assertIn("skills/caveman/SKILL.md", bundle)
+        self.assertIn("members.json", bundle)
         self.assertNotIn("keys/secret.ed25519", bundle)
 
     def test_apply_bundle_and_tombstones(self):
