@@ -149,6 +149,7 @@ def deliver(
     *,
     limit: int = 1000,
     origin_only: bool = False,
+    exclude_origin: str | None = None,
     ws: str = "",
 ) -> int:
     """Pull the local tail since the peer's ACKED cursor and send a batch.
@@ -164,11 +165,15 @@ def deliver(
 
     origin_only=True drops re-broadcast ops (a spoke must never send
     foreign-origin ops back to the hub that delivered them).
+    exclude_origin=<peer> drops ops the peer originally minted — a hub
+    must never echo a device's own datoms back at it.
     """
     since = book.acked(peer)
     ops = ops_since(since)[:limit]
     if origin_only:
         ops = [o for o in ops if o.get("origin_actor") in (None, node_id)]
+    if exclude_origin is not None:
+        ops = [o for o in ops if o.get("origin_actor") != exclude_origin]
     if not ops:
         return since
     batch_cursor = max(o["tx"] for o in ops)
@@ -200,7 +205,10 @@ def receive(
             continue
         stats["envelopes"] += 1
         datoms = [(d["e"], d["a"], d["v"], bool(d["added"])) for d in env.get("datoms", [])]
-        res = ingest(env["actor"], int(env["seq"]), env.get("hlc", ""), datoms)
+        res = ingest(
+            env["actor"], int(env["seq"]), env.get("hlc", ""), datoms,
+            op=env.get("op") or "assert", note=env.get("note"),
+        )
         applied = getattr(res, "applied", 0)
         dupes = getattr(res, "dupes", 0)
         refused = getattr(res, "refused", 0)

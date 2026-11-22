@@ -35,7 +35,7 @@ class FakeIngest:
         self.calls = []
         self.deduped = set()
 
-    def __call__(self, actor, seq, hlc, datoms):
+    def __call__(self, actor, seq, hlc, datoms, *, op="assert", note=None):
         key = (actor, seq)
         if key in self.deduped:
             return type("R", (), {"applied": 0, "dupes": len(datoms), "refused": 0})()
@@ -150,6 +150,37 @@ class TestReceive(unittest.TestCase):
         (actor, seq, hlc, datoms) = ingest_b.calls[0]
         self.assertEqual((actor, seq), ("nodeA", 1))
         self.assertEqual(datoms[0][0], "e1")
+
+    def test_receive_passes_op_and_note(self):
+        """scrub tombstones need op='scrub' + note=<entity> on the wire."""
+        envs = [{"v": 1, "actor": "hub", "seq": 7, "hlc": "x",
+                 "op": "scrub", "note": "e99", "datoms": []}]
+
+        class Recorder:
+            def __init__(self):
+                self.kw = None
+
+            def __call__(self, actor, seq, hlc, datoms, *, op="assert", note=None):
+                self.kw = (op, note)
+                return type("R", (), {"applied": 0, "dupes": 0, "refused": 0})()
+
+        rec = Recorder()
+        receive(envs, rec)
+        self.assertEqual(rec.kw, ("scrub", "e99"))
+
+
+class TestDeliverExcludeOrigin(unittest.TestCase):
+    def test_hub_never_echoes_peer_ops(self):
+        """Hub tail holds dev-B ops; deliver to B must drop them."""
+        with tempfile.TemporaryDirectory() as td:
+            book = PeerBook(Path(td) / "peers.json")
+            ops = make_ops(1, start=1) + make_ops(2, start=2, actor="devB")
+            sent = Capture()
+            deliver(lambda since: ops, book, "devB", "hub", sent,
+                    exclude_origin="devB")
+            envs = sent.sent[0]["envelopes"]
+            self.assertEqual(len(envs), 1)
+            self.assertEqual(envs[0]["seq"], 1)
 
 
 if __name__ == "__main__":
