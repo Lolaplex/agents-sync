@@ -9,6 +9,10 @@ FORBIDDEN_EXTENSIONS: Set[str] = {
     ".ed25519",  # Ed25519 private keys
     ".sqlite",
     ".db",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".db-wal",
+    ".db-shm",
     ".lock",
     ".tmp",
     ".pyc",
@@ -51,6 +55,9 @@ DOMAINS: Dict[str, DomainSpec] = {
     "rules": DomainSpec("rules", "rules", is_file=False),
     "skills": DomainSpec("skills", "skills", is_file=False),
     "traces": DomainSpec("traces", "traces", is_file=False),
+    "personas": DomainSpec("personas", "personas", is_file=False),
+    "schedules": DomainSpec("schedules", "schedules", is_file=False),
+    "config": DomainSpec("config", "config.json", is_file=True),
     "members": DomainSpec("members", "members.json", is_file=True),
 }
 

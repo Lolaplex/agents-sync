@@ -151,10 +151,36 @@ class TestHostConfig(unittest.TestCase):
     def test_domains_are_workspace_only(self):
         from agents_sync.domains import DOMAINS
         from agents_sync.config import DEFAULT_DOMAINS
-        self.assertEqual(set(DOMAINS), {"memory", "rules", "skills", "traces", "members"})
+        self.assertEqual(
+            set(DOMAINS),
+            {
+                "memory",
+                "rules",
+                "skills",
+                "traces",
+                "personas",
+                "schedules",
+                "config",
+                "members",
+            },
+        )
         self.assertTrue(DOMAINS["members"].is_file)
         self.assertEqual(DOMAINS["members"].relative_path, "members.json")
-        self.assertEqual(DEFAULT_DOMAINS, ["memory", "rules", "skills", "traces", "members"])
+        self.assertTrue(DOMAINS["config"].is_file)
+        self.assertEqual(DOMAINS["config"].relative_path, "config.json")
+        self.assertEqual(
+            DEFAULT_DOMAINS,
+            [
+                "memory",
+                "rules",
+                "skills",
+                "traces",
+                "personas",
+                "schedules",
+                "config",
+                "members",
+            ],
+        )
 
     def test_from_dict_is_pure_and_save_config_writes_node_id(self):
         from agents_workspace import Host
@@ -181,7 +207,19 @@ class TestHostConfig(unittest.TestCase):
                 self.assertEqual(cfg2.node_id, "pinned-node")
                 save_config(SyncConfig(url="https://sync.example", node_id="other"))
                 self.assertEqual(get_host_config()["node_id"], "pinned-node")
-                self.assertEqual(loaded.enabled_domains, ["memory", "rules", "skills", "traces", "members"])
+                self.assertEqual(
+                    loaded.enabled_domains,
+                    [
+                        "memory",
+                        "rules",
+                        "skills",
+                        "traces",
+                        "personas",
+                        "schedules",
+                        "config",
+                        "members",
+                    ],
+                )
 
     def test_agents_dir_env_ignored(self):
         import os, tempfile

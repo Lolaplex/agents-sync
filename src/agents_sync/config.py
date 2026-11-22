@@ -19,7 +19,16 @@ from agents_workspace import (
     write_secret,
 )
 
-DEFAULT_DOMAINS = ["memory", "rules", "skills", "traces", "members"]
+DEFAULT_DOMAINS = [
+    "memory",
+    "rules",
+    "skills",
+    "traces",
+    "personas",
+    "schedules",
+    "config",
+    "members",
+]
 
 
 def _current_workspace() -> Optional[Workspace]:
