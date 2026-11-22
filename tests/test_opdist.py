@@ -75,7 +75,7 @@ class TestPeerBook(unittest.TestCase):
 
 
 class TestDeliver(unittest.TestCase):
-    def test_deliver_advances_cursor(self):
+    def test_deliver_reads_acked_not_optimistic(self):
         with tempfile.TemporaryDirectory() as d:
             book = PeerBook(Path(d) / "peers.json")
             ops = make_ops(3)
@@ -83,24 +83,42 @@ class TestDeliver(unittest.TestCase):
             cursor = deliver(lambda c: [o for o in ops if o["tx"] > c],
                              book, "peer1", "nodeA", sent)
             self.assertEqual(cursor, 3)
-            self.assertEqual(len(sent.sent), 1)
-            self.assertEqual(len(sent.sent[0]), 3)
-            # second call with no new ops sends nothing
+            batch = sent.sent[0]
+            self.assertEqual(batch["batch_cursor"], 3)
+            self.assertEqual(len(batch["envelopes"]), 3)
+            # no ack yet -> a crash here must redeliver everything
             sent2 = Capture()
-            cursor2 = deliver(lambda c: [o for o in ops if o["tx"] > c],
-                              book, "peer1", "nodeA", sent2)
-            self.assertEqual(cursor2, 3)
-            self.assertEqual(sent2.sent, [])
+            deliver(lambda c: [o for o in ops if o["tx"] > c],
+                    book, "peer1", "nodeA", sent2)
+            self.assertEqual(len(sent2.sent[0]["envelopes"]), 3)
+            # ack arrives -> next deliver sends nothing
+            book.ack("peer1", 3)
+            sent3 = Capture()
+            deliver(lambda c: [o for o in ops if o["tx"] > c],
+                    book, "peer1", "nodeA", sent3)
+            self.assertEqual(sent3.sent, [])
 
-    def test_deliver_sends_only_new_ops(self):
+    def test_deliver_sends_only_unacked_ops(self):
         with tempfile.TemporaryDirectory() as d:
             book = PeerBook(Path(d) / "peers.json")
             ops = make_ops(5)
-            book.advance("peer1", 3)
+            book.ack("peer1", 3)
             sent = Capture()
             deliver(lambda c: [o for o in ops if o["tx"] > c],
                     book, "peer1", "nodeA", sent)
-            self.assertEqual(len(sent.sent[0]), 2)
+            self.assertEqual(len(sent.sent[0]["envelopes"]), 2)
+
+    def test_origin_only_drops_foreign_ops(self):
+        with tempfile.TemporaryDirectory() as d:
+            book = PeerBook(Path(d) / "peers.json")
+            ops = make_ops(1, actor=None) + make_ops(1, start=9, actor="nodeZ")
+            ops[1]["tx"] = 4
+            sent = Capture()
+            deliver(lambda c: [o for o in ops if o["tx"] > c],
+                    book, "hub", "nodeA", sent, origin_only=True)
+            envs = sent.sent[0]["envelopes"]
+            self.assertEqual(len(envs), 1)
+            self.assertEqual(envs[0]["actor"], "nodeA")
 
 
 class TestReceive(unittest.TestCase):

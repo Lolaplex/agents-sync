@@ -61,6 +61,27 @@ def dedupe_key(env: Dict[str, Any]) -> str:
     return f"{env['actor']}:{env['seq']}"
 
 
+class BoundedSeen:
+    """Fast-path dedupe ring: last N envelope keys in memory. The store's
+    origin index remains the only durable truth — this is a pure
+    short-circuit for hot redelivery loops."""
+
+    def __init__(self, size: int = 4096):
+        self._size = size
+        self._keys: dict[str, None] = {}
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._keys
+
+    def add(self, key: str) -> None:
+        if key in self._keys:
+            self._keys.move_to_end(key)
+            return
+        self._keys[key] = None
+        while len(self._keys) > self._size:
+            self._keys.popitem(last=False)
+
+
 class PeerBook:
     """Per-peer send/receive cursors in a JSON sidecar file.
 
@@ -98,6 +119,10 @@ class PeerBook:
     def cursor(self, peer: str) -> int:
         return int(self._peers.get(peer, {}).get("cursor", 0))
 
+    def acked(self, peer: str) -> int:
+        """Durable receive cursor the peer confirmed — the send floor."""
+        return int(self._peers.get(peer, {}).get("acked", 0))
+
     def advance(self, peer: str, cursor: int) -> None:
         rec = self._peers.setdefault(peer, {"cursor": 0, "acked": 0})
         rec["cursor"] = max(int(rec["cursor"]), int(cursor))
@@ -106,6 +131,7 @@ class PeerBook:
     def ack(self, peer: str, seq: int) -> None:
         rec = self._peers.setdefault(peer, {"cursor": 0, "acked": 0})
         rec["acked"] = max(int(rec["acked"]), int(seq))
+        rec["cursor"] = max(int(rec["cursor"]), int(seq))
         self._save()
 
     def resync(self, peer: str) -> None:
@@ -119,30 +145,46 @@ def deliver(
     book: PeerBook,
     peer: str,
     node_id: str,
-    send: Callable[[List[Dict[str, Any]]], None],
+    send: Callable[[Dict[str, Any]], None],
     *,
     limit: int = 1000,
+    origin_only: bool = False,
+    ws: str = "",
 ) -> int:
-    """Pull the local tail since the peer's cursor and send envelopes.
+    """Pull the local tail since the peer's ACKED cursor and send a batch.
 
-    ops_since(cursor) -> store tail rows; send(envelopes) -> transport
-    (relay channel op frames, HTTP POST, whatever). Returns the cursor
-    advanced to (the max tx sent, or the unchanged cursor).
+    The send cursor is NEVER advanced optimistically: it moves only when
+    the peer acknowledges. A crash after send() must redeliver, so the
+    floor is book.acked(peer), and book.advance() runs on the ack path
+    (PeerBook.ack), not here.
+
+    The batch envelope carries {"v", "ws", "batch_cursor", "envelopes"};
+    the receiver acks batch_cursor back over the same channel once its
+    ingest commit lands.
+
+    origin_only=True drops re-broadcast ops (a spoke must never send
+    foreign-origin ops back to the hub that delivered them).
     """
-    cursor = book.cursor(peer)
-    ops = ops_since(cursor)[:limit]
+    since = book.acked(peer)
+    ops = ops_since(since)[:limit]
+    if origin_only:
+        ops = [o for o in ops if o.get("origin_actor") in (None, node_id)]
     if not ops:
-        return cursor
-    send(pack_ops(ops, node_id))
-    new_cursor = max(o["tx"] for o in ops)
-    book.advance(peer, new_cursor)
-    return new_cursor
+        return since
+    batch_cursor = max(o["tx"] for o in ops)
+    send({
+        "v": ENVELOPE_VERSION,
+        "ws": ws,
+        "batch_cursor": batch_cursor,
+        "envelopes": pack_ops(ops, node_id),
+    })
+    return batch_cursor
 
 
 def receive(
     envelopes: List[Dict[str, Any]],
     ingest: IngestFn,
-    seen: set[str] | None = None,
+    seen: BoundedSeen | None = None,
 ) -> Dict[str, int]:
     """Hand received envelopes to the store ingest callback.
 
