@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `personas`, `schedules`, `config` sync domains; SQLite sidecar exclusions (`.db`/`.sqlite`/`.sqlite3`/`-wal`/`-shm`) so live stores never sync half-written state (#5).
+
 ### Changed
 - `.mailmap` maps legacy `Klix`/`Felix Kempf` author names to `Klix927` (no history rewrite; display only).
 

@@ -33,6 +33,28 @@ class TestDomains(unittest.TestCase):
         self.assertFalse(is_path_safe("secrets/token.txt"))
         self.assertFalse(is_path_safe("memory/secrets/a.md"))
 
+    def test_sqlite_sidecars_blocked(self):
+        for path in (
+            "store.db-wal",
+            "store.db-shm",
+            "store.sqlite-wal",
+            "store.sqlite-shm",
+            "memory/store.db-wal",
+            "memory/store.db-shm",
+            "memory/store.sqlite-wal",
+            "memory/store.sqlite-shm",
+        ):
+            self.assertFalse(is_path_safe(path), path)
+
+    def test_new_domains_registered(self):
+        for name in ("personas", "schedules", "config"):
+            self.assertIn(name, DOMAINS)
+        root = Path("/tmp/agents")
+        self.assertEqual(get_domain_root(root, "personas"), root / "personas")
+        self.assertEqual(get_domain_root(root, "schedules"), root / "schedules")
+        self.assertEqual(get_domain_root(root, "config"), root / "config.json")
+        self.assertTrue(DOMAINS["config"].is_file)
+
     def test_run_dir_blocked(self):
         self.assertFalse(is_path_safe("run/delegates/dlg_1/meta.json"))
         self.assertFalse(is_path_safe("run/procs/proc_1/out.log"))
