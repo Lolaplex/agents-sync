@@ -24,16 +24,36 @@ hubs keeps its true origin, so echo and re-delivery collapse.
 """
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 import os
 import tempfile
+import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Protocol, Tuple
+
+log = logging.getLogger(__name__)
 
 ENVELOPE_VERSION = 1
 PEERS_FILE = "sync_peers.json"
 
-IngestFn = Callable[[str, int, str, Iterable[Tuple[str, str, str, bool]]], Any]
+
+class IngestFn(Protocol):
+    """Store-side ingest callback: (actor, seq, hlc, datoms, *, op, note)
+    -> result carrying .applied/.dupes/.refused datom counts."""
+
+    def __call__(
+        self,
+        actor: str,
+        seq: int,
+        hlc: str,
+        datoms: Iterable[Tuple[str, str, str, bool]],
+        *,
+        op: str = "assert",
+        note: str | None = None,
+    ) -> Any: ...
 
 
 def pack_ops(ops: List[Dict[str, Any]], node_id: str) -> List[Dict[str, Any]]:
@@ -48,7 +68,8 @@ def pack_ops(ops: List[Dict[str, Any]], node_id: str) -> List[Dict[str, Any]]:
         out.append({
             "v": ENVELOPE_VERSION,
             "actor": op.get("origin_actor") or node_id,
-            "seq": int(op.get("origin_seq") or op["tx"]),
+            "seq": (int(op["origin_seq"]) if op.get("origin_seq") is not None
+                    else int(op["tx"])),
             "hlc": op.get("hlc") or "",
             "op": op.get("op") or "assert",
             "note": op.get("note"),
@@ -67,8 +88,10 @@ class BoundedSeen:
     short-circuit for hot redelivery loops."""
 
     def __init__(self, size: int = 4096):
+        if size < 1:
+            raise ValueError("BoundedSeen size must be >= 1")
         self._size = size
-        self._keys: dict[str, None] = {}
+        self._keys: OrderedDict[str, None] = OrderedDict()
 
     def __contains__(self, key: str) -> bool:
         return key in self._keys
@@ -82,51 +105,99 @@ class BoundedSeen:
             self._keys.popitem(last=False)
 
 
+_BOOK_LOCKS: Dict[str, threading.RLock] = {}
+_BOOK_LOCKS_GUARD = threading.Lock()
+
+
+def _book_lock(path: Path) -> threading.RLock:
+    """One lock per resolved peers-file path, shared by every PeerBook
+    instance pointing at it (multiple hub workers can hold separate
+    books on the same sync_peers.json)."""
+    key = os.path.normcase(str(Path(path).resolve()))
+    with _BOOK_LOCKS_GUARD:
+        lock = _BOOK_LOCKS.get(key)
+        if lock is None:
+            lock = _BOOK_LOCKS[key] = threading.RLock()
+        return lock
+
+
 class PeerBook:
     """Per-peer send/receive cursors in a JSON sidecar file.
 
-    cursor = last origin-seq offered to this peer (send side);
-    acked  = last origin-seq the peer confirmed (receive side).
-    Resume = "send ops after cursor"; resync = reset cursor to 0.
+    acked = last origin-seq the peer confirmed — the single durable
+    delivery cursor. cursor() reports the same position; resume =
+    "send ops after acked"; resync = reset the peer to 0.
     """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
+        self._lock = _book_lock(self.path)
         self._peers: Dict[str, Dict[str, Any]] = {}
         self._load()
 
-    def _load(self) -> None:
+    def _read(self) -> Dict[str, Dict[str, Any]]:
         if self.path.exists():
             try:
-                self._peers = json.loads(self.path.read_text(encoding="utf-8"))
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
             except (json.JSONDecodeError, OSError):
-                self._peers = {}
-
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self._peers, f, indent=1, sort_keys=True)
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
                 pass
-            raise
+        return {}
+
+    def _load(self) -> None:
+        with self._lock:
+            self._peers = self._read()
+
+    def _save(self, reset: Iterable[str] = ()) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        reset = frozenset(reset)
+        # Reload-merge under the per-path lock BEFORE the replace: peers
+        # written by sibling instances merge monotonically (max per
+        # field) so one worker never clobbers another's cursors. Peers
+        # in `reset` take the in-memory record verbatim (resync intent).
+        with self._lock:
+            disk = self._read()
+            merged: Dict[str, Dict[str, Any]] = {}
+            for peer in set(disk) | set(self._peers):
+                if peer in reset:
+                    merged[peer] = dict(self._peers[peer])
+                    continue
+                d = disk.get(peer) or {}
+                m = self._peers.get(peer) or {}
+                merged[peer] = {
+                    "cursor": max(int(d.get("cursor", 0)),
+                                  int(m.get("cursor", 0))),
+                    "acked": max(int(d.get("acked", 0)),
+                                 int(m.get("acked", 0))),
+                }
+            fd, tmp = tempfile.mkstemp(dir=str(self.path.parent),
+                                       suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(merged, f, indent=1, sort_keys=True)
+                os.replace(tmp, self.path)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            self._peers = merged
 
     def cursor(self, peer: str) -> int:
-        return int(self._peers.get(peer, {}).get("cursor", 0))
+        """Durable delivery cursor — identical to acked(peer)."""
+        return self.acked(peer)
 
     def acked(self, peer: str) -> int:
         """Durable receive cursor the peer confirmed — the send floor."""
         return int(self._peers.get(peer, {}).get("acked", 0))
 
     def advance(self, peer: str, cursor: int) -> None:
-        rec = self._peers.setdefault(peer, {"cursor": 0, "acked": 0})
-        rec["cursor"] = max(int(rec["cursor"]), int(cursor))
-        self._save()
+        """Backward-compat alias for ack(): the acked cursor is the only
+        position deliver() consults — a send without ack must redeliver,
+        so no separate optimistic cursor is kept."""
+        self.ack(peer, cursor)
 
     def ack(self, peer: str, seq: int) -> None:
         rec = self._peers.setdefault(peer, {"cursor": 0, "acked": 0})
@@ -137,11 +208,38 @@ class PeerBook:
     def resync(self, peer: str) -> None:
         """Drop the peer cursor: next pull replays the full tail."""
         self._peers[peer] = {"cursor": 0, "acked": 0}
-        self._save()
+        self._save(reset={peer})
+
+
+def _since_kwargs(
+    ops_since: Callable[..., List[Dict[str, Any]]],
+    origin_only: bool,
+    exclude_origin: str | None,
+    local_origins: Tuple[str, ...],
+) -> Dict[str, Any]:
+    """Filter kwargs the ops_since callable accepts. Forwarded filters
+    let the store reject ops at SQL level; the in-memory check in
+    deliver() stays authoritative either way (idempotent)."""
+    try:
+        params = inspect.signature(ops_since).parameters
+    except (TypeError, ValueError):
+        params = {}
+    accepts_all = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                      for p in params.values())
+    kw: Dict[str, Any] = {}
+    for name, value in (("origin_only", origin_only),
+                        ("exclude_origin", exclude_origin),
+                        ("local_origins", local_origins)):
+        p = params.get(name)
+        if accepts_all or (p is not None
+                           and p.kind is not
+                           inspect.Parameter.POSITIONAL_ONLY):
+            kw[name] = value
+    return kw
 
 
 def deliver(
-    ops_since: Callable[[int], List[Dict[str, Any]]],
+    ops_since: Callable[..., List[Dict[str, Any]]],
     book: PeerBook,
     peer: str,
     node_id: str,
@@ -150,38 +248,73 @@ def deliver(
     limit: int = 1000,
     origin_only: bool = False,
     exclude_origin: str | None = None,
+    local_origins: Tuple[str, ...] = (),
     ws: str = "",
 ) -> int:
     """Pull the local tail since the peer's ACKED cursor and send a batch.
 
     The send cursor is NEVER advanced optimistically: it moves only when
     the peer acknowledges. A crash after send() must redeliver, so the
-    floor is book.acked(peer), and book.advance() runs on the ack path
-    (PeerBook.ack), not here.
+    floor is book.acked(peer), moved by PeerBook.ack on the ack path,
+    not here.
 
     The batch envelope carries {"v", "ws", "batch_cursor", "envelopes"};
     the receiver acks batch_cursor back over the same channel once its
     ingest commit lands.
 
     origin_only=True drops re-broadcast ops (a spoke must never send
-    foreign-origin ops back to the hub that delivered them).
+    foreign-origin ops back to the hub that delivered them). Ops minted
+    locally under a projection actor (proj@/bind@/import@...) still count
+    as local when their prefix is listed in local_origins.
     exclude_origin=<peer> drops ops the peer originally minted — a hub
     must never echo a device's own datoms back at it.
+
+    Filtering happens while paging the tail: chunks that come back
+    empty-after-filter never starve the scan at `limit` — it keeps
+    reading until `limit` sendable ops are collected or the tail runs
+    out. A scanned range that is 100% filtered-out is ack-skipped
+    (book.ack) so it is never rescanned; delivered-but-unacked ops are
+    never skipped — they redeliver until the peer acks batch_cursor.
     """
     since = book.acked(peer)
-    ops = ops_since(since)[:limit]
-    if origin_only:
-        ops = [o for o in ops if o.get("origin_actor") in (None, node_id)]
-    if exclude_origin is not None:
-        ops = [o for o in ops if o.get("origin_actor") != exclude_origin]
-    if not ops:
-        return since
-    batch_cursor = max(o["tx"] for o in ops)
+    kwargs = _since_kwargs(ops_since, origin_only, exclude_origin,
+                           local_origins)
+    sendable: List[Dict[str, Any]] = []
+    scan = since
+    max_scanned = since
+    while len(sendable) < limit:
+        batch = ops_since(scan, **kwargs)
+        if not batch:
+            break
+        hi = max(o["tx"] for o in batch)
+        if hi <= scan:
+            break  # no forward progress — bail instead of rescanning
+        max_scanned = max(max_scanned, hi)
+        for o in batch:
+            if len(sendable) >= limit:
+                break
+            if o["tx"] <= scan:
+                continue  # defensive: never re-collect a scanned tx
+            actor = o.get("origin_actor")
+            if origin_only and actor is not None and actor != node_id \
+                    and not any(actor.startswith(p) for p in local_origins):
+                continue
+            if exclude_origin is not None and actor == exclude_origin:
+                continue
+            sendable.append(o)
+        scan = hi
+    if not sendable:
+        if max_scanned > since:
+            # every scanned op was filtered out: skip the dead range
+            # durably or the next tick would rescan it forever.
+            book.ack(peer, max_scanned)
+        return book.acked(peer)
+    batch_cursor = max(o["tx"] for o in sendable)
     send({
         "v": ENVELOPE_VERSION,
         "ws": ws,
         "batch_cursor": batch_cursor,
-        "envelopes": pack_ops(ops, node_id),
+        "envelopes": pack_ops(sendable, node_id),
     })
     return batch_cursor
 
@@ -199,14 +332,28 @@ def receive(
     """
     stats = {"applied": 0, "dupes": 0, "refused": 0, "envelopes": 0}
     for env in envelopes:
-        key = dedupe_key(env)
+        # Malformed or foreign-version envelopes are counted and skipped
+        # one by one: a single bad frame must never abort the batch and
+        # poison-block the ack for the valid envelopes behind it.
+        if not isinstance(env, dict) or env.get("v") != ENVELOPE_VERSION:
+            stats["refused"] += 1
+            log.warning("opdist: refused non-v%d envelope", ENVELOPE_VERSION)
+            continue
+        try:
+            key = dedupe_key(env)
+            seq = int(env["seq"])
+            datoms = [(d["e"], d["a"], d["v"], bool(d["added"]))
+                      for d in env.get("datoms", [])]
+        except (KeyError, TypeError, ValueError):
+            stats["refused"] += 1
+            log.warning("opdist: refused malformed envelope")
+            continue
         if seen is not None and key in seen:
-            stats["dupes"] += len(env.get("datoms", []))
+            stats["dupes"] += len(datoms)
             continue
         stats["envelopes"] += 1
-        datoms = [(d["e"], d["a"], d["v"], bool(d["added"])) for d in env.get("datoms", [])]
         res = ingest(
-            env["actor"], int(env["seq"]), env.get("hlc", ""), datoms,
+            env["actor"], seq, env.get("hlc", ""), datoms,
             op=env.get("op") or "assert", note=env.get("note"),
         )
         applied = getattr(res, "applied", 0)

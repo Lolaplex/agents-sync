@@ -1,9 +1,11 @@
 """Op-log distribution: envelope packing, peer cursors, dedupe, resume."""
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from agents_sync.opdist import PeerBook, dedupe_key, deliver, pack_ops, receive
+from agents_sync.opdist import (
+    BoundedSeen, PeerBook, dedupe_key, deliver, pack_ops, receive)
 
 
 def make_ops(n, start=1, actor=None):
@@ -60,6 +62,33 @@ class TestPack(unittest.TestCase):
         self.assertEqual(dedupe_key(env), "nodeA:1")
 
 
+class TestBoundedSeen(unittest.TestCase):
+    def test_repeat_add_and_capacity(self):
+        seen = BoundedSeen(4)
+        seen.add("k1")
+        seen.add("k1")  # repeat key -> LRU refresh, must not crash
+        for i in range(20):  # > capacity -> LRU eviction, must not crash
+            seen.add(f"d{i}")
+        self.assertEqual(len(seen._keys), 4)
+        for k in ("d16", "d17", "d18", "d19"):
+            self.assertIn(k, seen)
+        self.assertNotIn("k1", seen)
+        self.assertNotIn("d0", seen)
+
+    def test_repeat_key_refreshes_lru_position(self):
+        seen = BoundedSeen(3)
+        for k in ("a", "b", "c"):
+            seen.add(k)
+        seen.add("a")  # refresh: b is now oldest
+        seen.add("d")
+        self.assertIn("a", seen)
+        self.assertNotIn("b", seen)
+
+    def test_size_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            BoundedSeen(0)
+
+
 class TestPeerBook(unittest.TestCase):
     def test_cursor_advance_ack_resync(self):
         with tempfile.TemporaryDirectory() as d:
@@ -72,6 +101,26 @@ class TestPeerBook(unittest.TestCase):
             self.assertEqual(book2.cursor("peer1"), 42)
             book2.resync("peer1")
             self.assertEqual(PeerBook(Path(d) / "peers.json").cursor("peer1"), 0)
+
+    def test_sibling_instances_never_clobber(self):
+        """Two PeerBook objects on one file: each ack() must merge the
+        other's persisted peers instead of overwriting the whole file."""
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "sync_peers.json"
+            book_a = PeerBook(path)
+            book_b = PeerBook(path)
+            book_a.ack("dev1", 50)
+            book_b.ack("dev2", 30)
+            disk = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(disk["dev1"]["acked"], 50)
+            self.assertEqual(disk["dev2"]["acked"], 30)
+            # the later writer merged the sibling's peers into memory too
+            self.assertEqual(book_b.acked("dev1"), 50)
+            # monotonic: a lower seq from a stale instance never regresses
+            book_b2 = PeerBook(path)
+            book_b2.ack("dev1", 40)
+            disk = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(disk["dev1"]["acked"], 50)
 
 
 class TestDeliver(unittest.TestCase):
@@ -120,6 +169,94 @@ class TestDeliver(unittest.TestCase):
             self.assertEqual(len(envs), 1)
             self.assertEqual(envs[0]["actor"], "nodeA")
 
+    def test_deliver_scans_past_filtered_run(self):
+        """1500 foreign ops then 1 local op: the sendable tx must be
+        found past the first `limit` slice, not starve at tx 1000."""
+        with tempfile.TemporaryDirectory() as d:
+            book = PeerBook(Path(d) / "peers.json")
+            ops = make_ops(1500, actor="nodeZ") + make_ops(1, start=1501)
+            sent = Capture()
+            cursor = deliver(lambda c: [o for o in ops if o["tx"] > c],
+                             book, "hub", "nodeA", sent, origin_only=True)
+            self.assertEqual(cursor, 1501)
+            envs = sent.sent[0]["envelopes"]
+            self.assertEqual(len(envs), 1)
+            self.assertEqual(envs[0]["seq"], 1501)
+
+    def test_deliver_scans_paged_tail(self):
+        """Same starvation via a chunked ops_since (like a store-side
+        LIMIT): the scan must keep paging across empty-after-filter
+        chunks until the sendable op shows up."""
+        with tempfile.TemporaryDirectory() as d:
+            book = PeerBook(Path(d) / "peers.json")
+            ops = make_ops(1500, actor="nodeZ") + make_ops(1, start=1501)
+            sent = Capture()
+
+            def paged(c, n=400):
+                return [o for o in ops if o["tx"] > c][:n]
+
+            cursor = deliver(paged, book, "hub", "nodeA", sent,
+                             origin_only=True)
+            self.assertEqual(cursor, 1501)
+            self.assertEqual(len(sent.sent[0]["envelopes"]), 1)
+
+    def test_deliver_skips_pure_filtered_tail(self):
+        """A tail that is 100% filtered-out is ack-skipped durably so
+        the next tick never rescans it — without that, every drain
+        would re-read the same dead range forever."""
+        with tempfile.TemporaryDirectory() as d:
+            book = PeerBook(Path(d) / "peers.json")
+            ops = make_ops(1200, actor="nodeZ")
+            sent = Capture()
+            deliver(lambda c: [o for o in ops if o["tx"] > c],
+                    book, "hub", "nodeA", sent, origin_only=True)
+            self.assertEqual(sent.sent, [])
+            self.assertEqual(book.acked("hub"), 1200)
+            # next tick: nothing left to scan, nothing sent
+            sent2 = Capture()
+            deliver(lambda c: [o for o in ops if o["tx"] > c],
+                    book, "hub", "nodeA", sent2, origin_only=True)
+            self.assertEqual(sent2.sent, [])
+
+    def test_origin_only_includes_local_origins(self):
+        """Locally-minted projection ops (proj@/bind@/import@ actors)
+        count as local when their prefix is in local_origins."""
+        with tempfile.TemporaryDirectory() as d:
+            book = PeerBook(Path(d) / "peers.json")
+            ops = (make_ops(1, actor=None)
+                   + make_ops(1, start=2, actor="proj@host:ses")
+                   + make_ops(1, start=3, actor="nodeZ"))
+            sent = Capture()
+            deliver(lambda c: [o for o in ops if o["tx"] > c],
+                    book, "hub", "nodeA", sent, origin_only=True,
+                    local_origins=("proj@",))
+            envs = sent.sent[0]["envelopes"]
+            self.assertEqual(len(envs), 2)
+            self.assertEqual(envs[0]["actor"], "nodeA")
+            self.assertEqual(envs[1]["actor"], "proj@host:ses")
+
+    def test_deliver_forwards_kwargs_to_ops_since(self):
+        """When ops_since accepts filter kwargs they go straight down:
+        the store can then filter at SQL level instead of shipping raw
+        ops for in-memory filtering."""
+        with tempfile.TemporaryDirectory() as d:
+            book = PeerBook(Path(d) / "peers.json")
+            ops = make_ops(2, actor="nodeZ") + make_ops(1, start=3)
+            sent = Capture()
+
+            def filtered(c, *, origin_only=False, exclude_origin=None,
+                         local_origins=()):
+                assert origin_only is True
+                assert exclude_origin == "hub"
+                return [o for o in ops
+                        if o["tx"] > c and o.get("origin_actor") is None]
+
+            cursor = deliver(filtered, book, "hub", "nodeA", sent,
+                             origin_only=True, exclude_origin="hub",
+                             local_origins=("proj@",))
+            self.assertEqual(cursor, 3)
+            self.assertEqual(len(sent.sent[0]["envelopes"]), 1)
+
 
 class TestReceive(unittest.TestCase):
     def test_receive_applies_and_dedupes(self):
@@ -167,6 +304,23 @@ class TestReceive(unittest.TestCase):
         rec = Recorder()
         receive(envs, rec)
         self.assertEqual(rec.kw, ("scrub", "e99"))
+
+    def test_receive_skips_malformed_mid_batch(self):
+        """A malformed envelope must be counted/skipped, never abort the
+        batch — otherwise one bad frame poison-blocks the ack for every
+        valid envelope behind it."""
+        good1 = pack_ops(make_ops(1, start=1), "nodeA")
+        good2 = pack_ops(make_ops(1, start=4), "nodeA")
+        missing_actor = {"v": 1, "seq": 2, "datoms": []}
+        bad_version = {"v": 99, "actor": "n", "seq": 3, "datoms": []}
+        non_dict = "not-an-envelope"
+        ingest = FakeIngest()
+        stats = receive(
+            good1 + [missing_actor, bad_version, non_dict] + good2, ingest)
+        self.assertEqual(len(ingest.calls), 2)
+        self.assertEqual(stats["applied"], 2)
+        self.assertEqual(stats["refused"], 3)
+        self.assertEqual(stats["envelopes"], 2)
 
 
 class TestDeliverExcludeOrigin(unittest.TestCase):
