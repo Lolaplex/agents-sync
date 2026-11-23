@@ -28,7 +28,7 @@ def _make_request(
 ) -> Dict[str, Any]:
     full_url = urllib.parse.urljoin(url.rstrip("/") + "/", endpoint.lstrip("/"))
     headers = {
-        "User-Agent": "agents-sync/0.1.0",
+        "User-Agent": "agents-sync/0.2.0",
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
