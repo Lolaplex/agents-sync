@@ -1,7 +1,10 @@
+import contextlib
+import io
 import json
 import os
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -129,9 +132,23 @@ class TestCLI(unittest.TestCase):
 
     def test_serve_starts_without_token_flag(self):
         with patch("agents_sync.server.run_server") as run:
-            ret = main(["serve", "9", "--host", "127.0.0.1"])
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                ret = main(["serve", "9", "--host", "127.0.0.1"])
         self.assertEqual(ret, 0)
-        run.assert_called_once_with(port=9, host="127.0.0.1")
+        run.assert_called_once_with(
+            port=9, host="127.0.0.1", allow_insecure_dev=False
+        )
+
+    def test_serve_allow_insecure_dev_flag(self):
+        with patch("agents_sync.server.run_server") as run:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                ret = main(["serve", "9", "--allow-insecure-dev"])
+        self.assertEqual(ret, 0)
+        run.assert_called_once_with(
+            port=9, host="0.0.0.0", allow_insecure_dev=True
+        )
 
     def test_server_token_comes_from_env(self):
         from agents_sync.server import resolve_server_token
@@ -141,6 +158,180 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(resolve_server_token(""), "env-token")
         with patch.dict(os.environ, {"AGENTS_SYNC_TOKEN": ""}, clear=False):
             self.assertEqual(resolve_server_token("kept"), "kept")
+
+    def _set_sync_policy(self, ws, policy: str) -> None:
+        """Write sync_policy into workspace.json — version-agnostic across
+        agents-workspace releases (older versions have no create() kwarg)."""
+        meta_file = ws.dir / "workspace.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta["sync_policy"] = policy
+        meta_file.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    def test_sync_refused_on_local_sync_policy(self):
+        host = Host.open(self.tmp.name)
+        ws = host.create("localws")
+        self._set_sync_policy(ws, "local")
+        for command in ("sync", "push", "pull"):
+            with patch.dict(os.environ, {"AGENTS_WORKSPACE": "localws"}):
+                err = io.StringIO()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    with contextlib.redirect_stderr(err):
+                        ret = main([command])
+                self.assertEqual(ret, 2, command)
+                self.assertIn("sync_policy", err.getvalue())
+                self.assertIn("local", err.getvalue())
+
+    def test_sync_refused_on_missing_shared_corrupt_or_ambiguous_policy(self):
+        """The policy gate is fail-closed: missing workspaces, reserved
+        'shared', corrupt metadata, and malformed ownership fields all
+        refuse with exit 2 rather than defaulting to allow or crashing."""
+        host = Host.open(self.tmp.name)
+
+        def run_refusal(ws_id):
+            with patch.dict(os.environ, {"AGENTS_WORKSPACE": ws_id}):
+                err = io.StringIO()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with contextlib.redirect_stderr(err):
+                        return main(["sync"]), err.getvalue()
+
+        ret, err = run_refusal("missing-ws")
+        self.assertEqual(ret, 2)
+        self.assertIn("missing", err)
+
+        no_policy = host.create("nopolicyws")
+        meta_file = no_policy.dir / "workspace.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta.pop("sync_policy", None)
+        meta_file.write_text(json.dumps(meta), encoding="utf-8")
+        ret, err = run_refusal("nopolicyws")
+        self.assertEqual(ret, 2)
+        self.assertIn("missing", err)
+
+        bad_ownership = host.create("badownershipws")
+        meta_file = bad_ownership.dir / "workspace.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta["default_host"] = 42
+        meta["sync_policy"] = "synced"
+        meta_file.write_text(json.dumps(meta), encoding="utf-8")
+        ret, err = run_refusal("badownershipws")
+        self.assertEqual(ret, 2)
+        self.assertIn("policy-error", err)
+
+        shared = host.create("sharedws")
+        self._set_sync_policy(shared, "shared")
+        ret, err = run_refusal("sharedws")
+        self.assertEqual(ret, 2)
+        self.assertIn("shared", err)
+
+        corrupt = host.create("corruptws")
+        (corrupt.dir / "workspace.json").write_text("{not json", encoding="utf-8")
+        ret, err = run_refusal("corruptws")
+        self.assertEqual(ret, 2)
+        self.assertIn("sync_policy", err)
+
+        ambiguous = host.create("ambiguousws")
+        meta_file = ambiguous.dir / "workspace.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta["sync_policy"] = "synced"
+        meta["sync_hosts"] = "not-a-list"
+        meta_file.write_text(json.dumps(meta), encoding="utf-8")
+        ret, err = run_refusal("ambiguousws")
+        self.assertEqual(ret, 2)
+        self.assertIn("policy-error", err)
+
+    def test_sync_warns_deprecated_and_runs_on_synced_workspace(self):
+        host = Host.open(self.tmp.name)
+        ws = host.create("syncws")
+        self._set_sync_policy(ws, "synced")
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "syncws"}):
+            with patch("agents_sync.cli.sync_all", return_value={
+                "pushed_files": 0,
+                "received_files": 0,
+                "locally_written": [],
+                "locally_deleted": [],
+            }) as sync_mock:
+                # Not connected -> must still emit DeprecationWarning first.
+                with self.assertWarns(DeprecationWarning):
+                    ret = main(["sync"])
+                self.assertEqual(ret, 1)
+                sync_mock.assert_not_called()
+
+    def test_push_uses_push_only_client(self):
+        host = Host.open(self.tmp.name)
+        ws = host.create("syncws")
+        self._set_sync_policy(ws, "synced")
+        cfg = SyncConfig(url="https://x.example", token="t")
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "syncws"}):
+            with patch("agents_sync.cli.load_config", return_value=cfg):
+                with patch(
+                    "agents_sync.cli.push_only",
+                    return_value={"pushed_files": 3},
+                ) as push_mock, patch("agents_sync.cli.sync_all") as sync_mock:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", DeprecationWarning)
+                        ret = main(["push"])
+        self.assertEqual(ret, 0)
+        push_mock.assert_called_once_with(cfg)
+        sync_mock.assert_not_called()
+
+    def test_pull_saves_merged_tombstones(self):
+        host = Host.open(self.tmp.name)
+        ws = host.create("syncws")
+        self._set_sync_policy(ws, "synced")
+        cfg = SyncConfig(url="https://x.example", token="t")
+        remote_tombs = {
+            "version": 1,
+            "files": {"memory/dead.md": "2999-01-01T00:00:00Z"},
+            "prefixes": {},
+            "bullets": {},
+        }
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "syncws"}):
+            with patch("agents_sync.cli.load_config", return_value=cfg):
+                with patch(
+                    "agents_sync.cli.fetch_snapshot",
+                    return_value=({}, {}, remote_tombs),
+                ):
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", DeprecationWarning)
+                        ret = main(["pull"])
+        self.assertEqual(ret, 0)
+        from agents_sync.tombstones import load_tombstones
+
+        saved = load_tombstones(ws.dir)
+        self.assertIn("memory/dead.md", saved["files"])
+
+    def test_peers_lists_and_resets_sync_peers(self):
+        host = Host.open(self.tmp.name)
+        ws = host.create("syncws")
+        (ws.dir / "sync_peers.json").write_text(
+            json.dumps({"hub-1": {"cursor": 5, "acked": 4}}),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "syncws"}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ret = main(["peers"])
+            self.assertEqual(ret, 0)
+            self.assertIn("hub-1", out.getvalue())
+            self.assertIn("5", out.getvalue())
+
+            ret = main(["peers", "--reset", "hub-1"])
+            self.assertEqual(ret, 0)
+            data = json.loads((ws.dir / "sync_peers.json").read_text())
+            self.assertEqual(data["hub-1"]["acked"], 0)
+            self.assertEqual(data["hub-1"]["cursor"], 0)
+
+    def test_peers_empty_when_no_file(self):
+        host = Host.open(self.tmp.name)
+        host.create("syncws")
+        with patch.dict(os.environ, {"AGENTS_WORKSPACE": "syncws"}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ret = main(["peers"])
+            self.assertEqual(ret, 0)
+            self.assertIn("sync_peers.json", out.getvalue())
 
 
 if __name__ == "__main__":

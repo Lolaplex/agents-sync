@@ -39,7 +39,7 @@ jobs:
           if [ "${GITHUB_BASE_REF:-}" != "main" ] && [ "${GITHUB_REF_NAME:-}" != "main" ]; then
             python scripts/dev-suite.py
           fi
-          pip install -e ".[server]"
+          pip install -e ".[server,test]"
 
       - name: Run test suite
         timeout-minutes: 10
