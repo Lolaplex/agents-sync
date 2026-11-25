@@ -8,14 +8,23 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from . import __version__
 from .bundle import apply_bundle, collect_bundle
-from .config import SyncConfig, get_agents_dir, load_config
+from .config import SyncConfig, _current_workspace, get_agents_dir, load_config
 from .protocol import EP_HEALTH, EP_MERGE, EP_SNAPSHOT, EP_STATUS, make_merge_payload
 from .tombstones import load_tombstones, merge_tombstones, save_tombstones
 
 
 class SyncClientError(Exception):
     """Raised when remote communication fails."""
+
+
+def _workspace_id() -> str:
+    """Active workspace id for vault partitioning (empty when unresolved)."""
+    ws = _current_workspace()
+    if ws is None:
+        return ""
+    return str(getattr(ws, "id", "") or "")
 
 
 def _make_request(
@@ -25,13 +34,16 @@ def _make_request(
     method: str = "GET",
     data: Optional[Dict[str, Any]] = None,
     timeout: int = 30,
+    workspace: str = "",
 ) -> Dict[str, Any]:
     full_url = urllib.parse.urljoin(url.rstrip("/") + "/", endpoint.lstrip("/"))
     headers = {
-        "User-Agent": "agents-sync/0.2.0",
+        "User-Agent": f"agents-sync/{__version__}",
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
+    if workspace:
+        headers["X-Agents-Workspace"] = workspace
     body: Optional[bytes] = None
     if data is not None:
         body = json.dumps(data).encode("utf-8")
@@ -70,12 +82,13 @@ def fetch_snapshot(
     url: str,
     token: str,
     domains: Optional[list[str]] = None,
+    workspace: str = "",
 ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, Any]]:
-    """Download full cloud vault snapshot."""
+    """Download cloud vault snapshot for one workspace partition."""
     ep = EP_SNAPSHOT
     if domains:
         ep += f"?domains={','.join(domains)}"
-    res = _make_request(url, ep, token)
+    res = _make_request(url, ep, token, workspace=workspace or _workspace_id())
     bundle = res.get("bundle", {})
     stamps = res.get("stamps", {})
     tombstones = res.get("tombstones", {})
@@ -86,9 +99,13 @@ def push_merge(
     url: str,
     token: str,
     payload: Dict[str, Any],
+    workspace: str = "",
 ) -> Dict[str, Any]:
     """Push local changes to remote vault and receive merged updates."""
-    return _make_request(url, EP_MERGE, token, method="POST", data=payload)
+    return _make_request(
+        url, EP_MERGE, token, method="POST", data=payload,
+        workspace=workspace or _workspace_id(),
+    )
 
 
 def sync_all(
@@ -110,6 +127,8 @@ def sync_all(
         bundle=local_bundle,
         stamps=local_stamps,
         tombstones=local_tombstones,
+        domains=cfg.enabled_domains,
+        workspace=_workspace_id(),
     )
 
     response = push_merge(cfg.url, cfg.token, payload)
@@ -123,6 +142,7 @@ def sync_all(
         remote_bundle,
         remote_tombstones=remote_tombs,
         remote_stamps=remote_stamps,
+        enabled_domains=cfg.enabled_domains,
     )
 
     # Save merged tombstones locally
@@ -135,3 +155,35 @@ def sync_all(
         "locally_written": written,
         "locally_deleted": deleted,
     }
+
+
+def push_only(
+    config: Optional[SyncConfig] = None,
+    agents_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Push-only sync: ship local state and converge tombstones, apply nothing."""
+    cfg = config or load_config()
+    if not cfg.is_connected():
+        raise SyncClientError("Not connected to cloud vault. Run: agents-sync connect <url> --token <token>")
+
+    root = agents_dir or get_agents_dir()
+    local_stamps: Dict[str, str] = {}
+    local_bundle = collect_bundle(root, cfg.enabled_domains, node_id=cfg.node_id, stamps=local_stamps)
+    local_tombstones = load_tombstones(root)
+
+    payload = make_merge_payload(
+        node_id=cfg.node_id,
+        bundle=local_bundle,
+        stamps=local_stamps,
+        tombstones=local_tombstones,
+        domains=cfg.enabled_domains,
+        workspace=_workspace_id(),
+    )
+
+    response = push_merge(cfg.url, cfg.token, payload)
+
+    # Converge deletion state without writing remote files locally.
+    merged_tombs = merge_tombstones(local_tombstones, response.get("tombstones", {}))
+    save_tombstones(root, merged_tombs)
+
+    return {"pushed_files": len(local_bundle)}

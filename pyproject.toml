@@ -29,6 +29,12 @@ classifiers = [
 server = [
     "fastapi>=0.110.0",
     "uvicorn>=0.28.0",
+    "httpx2>=2.0.0",
+]
+test = [
+    "fastapi>=0.110.0",
+    "httpx2>=2.0.0",
+    "pytest>=8.0.0",
 ]
 
 [project.urls]

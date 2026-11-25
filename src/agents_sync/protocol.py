@@ -17,11 +17,18 @@ def make_merge_payload(
     bundle: Dict[str, str],
     stamps: Dict[str, str],
     tombstones: Dict[str, Any],
+    domains: Optional[List[str]] = None,
+    workspace: str = "",
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "protocol": PROTOCOL_VERSION,
         "node_id": node_id,
         "bundle": bundle,
         "stamps": stamps,
         "tombstones": tombstones,
     }
+    if domains is not None:
+        payload["domains"] = list(domains)
+    if workspace:
+        payload["workspace"] = workspace
+    return payload

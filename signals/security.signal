@@ -1,0 +1,6 @@
+name: security
+kind: inferred
+shape: categorical
+face: in
+membrane: false
+note: a trust-boundary or fail-closed property changed — containment, auth, traversal, policy enforcement

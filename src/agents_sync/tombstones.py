@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -22,6 +24,16 @@ def mtime_iso(path: Path) -> str:
     except OSError:
         return now_iso()
     return datetime.fromtimestamp(stamp, timezone.utc).strftime(_TS_FMT)
+
+
+def parse_iso_timestamp(iso: Optional[str]) -> Optional[float]:
+    """Parse one sync timestamp to epoch seconds; None when malformed."""
+    try:
+        return datetime.strptime(str(iso), _TS_FMT).replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except (ValueError, TypeError):
+        return None
 
 
 def norm_rel(rel: str) -> str:
@@ -61,9 +73,30 @@ def load_tombstones(vault_root: Path) -> dict[str, Any]:
 
 
 def save_tombstones(vault_root: Path, tombstones: dict[str, Any]) -> None:
+    """Prune expired entries, then atomically replace the tombstone file.
+
+    Pruning must happen before persistence, not only in memory during a
+    merge; otherwise expired tombstones keep travelling in every later
+    snapshot. The temp+replace write prevents a half-written deletion
+    ledger from becoming authoritative after a crash.
+    """
     path = vault_root / TOMBSTONE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(tombstones, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    pruned = prune_tombstones(tombstones)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(pruned, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def merge_tombstones(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
@@ -88,6 +121,34 @@ def merge_tombstones(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
                 if b_text not in merged_bullets[file_key] or str(b_stamp) > str(merged_bullets[file_key][b_text]):
                     merged_bullets[file_key][b_text] = str(b_stamp)
     out["bullets"] = merged_bullets
+    return out
+
+
+def _is_expired(iso: str, cutoff: datetime) -> bool:
+    try:
+        ts = datetime.strptime(str(iso), _TS_FMT).replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False  # keep unparseable stamps: never resurrect by accident
+    return ts < cutoff
+
+
+def prune_tombstones(tombstones: dict[str, Any]) -> dict[str, Any]:
+    """Drop entries older than EXPIRY_DAYS so ancient deletions lapse."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=EXPIRY_DAYS)
+    out = empty_tombstones()
+    for cat in ("files", "prefixes"):
+        out[cat] = {
+            norm_rel(k): str(v)
+            for k, v in tombstones.get(cat, {}).items()
+            if not _is_expired(v, cutoff)
+        }
+    bullets = tombstones.get("bullets", {})
+    out["bullets"] = {
+        norm_rel(f): {b: str(s) for b, s in bmap.items() if not _is_expired(s, cutoff)}
+        for f, bmap in bullets.items()
+        if isinstance(bmap, dict)
+    }
+    out["bullets"] = {f: bmap for f, bmap in out["bullets"].items() if bmap}
     return out
 
 
