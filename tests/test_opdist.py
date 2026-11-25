@@ -141,6 +141,32 @@ class TestPeerBook(unittest.TestCase):
             self.assertEqual(book_a.acked("dev1"), 9)
             self.assertEqual(book_a.acked("dev2"), 3)
 
+    def test_ack_advance_reload_before_mutating(self):
+        """ack()/advance() must refresh a stale in-memory peer map before
+        read-modify-write. The reload states are captured before setdefault:
+        if either reload ran after mutation, its peer key would already be
+        present in the captured state."""
+        with tempfile.TemporaryDirectory() as d:
+            class SpyBook(PeerBook):
+                def __init__(self, path):
+                    self.reload_states = []
+                    super().__init__(path)
+
+                def _reload_if_stale(self):
+                    self.reload_states.append((
+                        "adv" in self._peers,
+                        "ack" in self._peers,
+                    ))
+                    return super()._reload_if_stale()
+
+            book = SpyBook(Path(d) / "peers.json")
+            book.advance("adv", 4)
+            book.ack("ack", 5)
+            self.assertFalse(book.reload_states[0][0])  # before adv setdefault
+            self.assertFalse(book.reload_states[1][1])  # before ack setdefault
+            self.assertEqual(book.cursor("adv"), 4)
+            self.assertEqual(book.acked("ack"), 5)
+
     def test_advance_moves_cursor_only(self):
         """advance() is the legacy optimistic cursor: it must never lift
         the acked floor, or a crash after a bare send would lose ops."""
@@ -459,6 +485,34 @@ class TestReceive(unittest.TestCase):
         self.assertEqual(stats["applied"], 1)
         self.assertEqual(stats["refused"], len(bad))
         self.assertEqual(stats["envelopes"], 1)
+
+    def test_receive_refuses_non_string_op_note(self):
+        """op/note ride into the store callback, so a non-str value is as
+        dangerous as a non-str datom field: refuse only that envelope.
+        Missing op and note=None remain valid legacy wire shapes."""
+        ingest = FakeIngest()
+        good = pack_ops(make_ops(1, start=1), "nodeA")
+
+        def mutated(tx, **changes):
+            env = pack_ops(make_ops(1, start=tx), "nodeA")[0]
+            env.update(changes)
+            return env
+
+        missing_op = mutated(2)
+        del missing_op["op"]
+        none_note = mutated(3, note=None)
+        bad = [
+            mutated(4, op=123),
+            mutated(5, op=False),
+            mutated(6, op={"kind": "assert"}),
+            mutated(7, note=123),
+            mutated(8, note=[]),
+        ]
+        stats = receive(good + [missing_op, none_note] + bad, ingest)
+        self.assertEqual(len(ingest.calls), 3)
+        self.assertEqual(stats["applied"], 3)
+        self.assertEqual(stats["refused"], len(bad))
+        self.assertEqual(stats["envelopes"], 3)
 
     def test_receive_fully_refused_op_not_marked_seen(self):
         """applied==0 & dupes==0 & refused>0 -> skip the seen mark: a

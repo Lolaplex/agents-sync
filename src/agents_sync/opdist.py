@@ -273,12 +273,14 @@ class PeerBook:
         untouched: a send without ack must redeliver, so advance() must
         never let an optimistic position masquerade as confirmed."""
         with self._lock:
+            self._reload_if_stale()
             rec = self._peers.setdefault(peer, {"cursor": 0, "acked": 0})
             rec["cursor"] = max(int(rec["cursor"]), int(cursor))
             self._save()
 
     def ack(self, peer: str, seq: int) -> None:
         with self._lock:
+            self._reload_if_stale()
             rec = self._peers.setdefault(peer, {"cursor": 0, "acked": 0})
             rec["acked"] = max(int(rec["acked"]), int(seq))
             rec["cursor"] = max(int(rec["cursor"]), int(seq))
@@ -460,9 +462,15 @@ def receive(
         actor = env.get("actor")
         seq = env.get("seq")
         hlc = env.get("hlc")
+        op = env.get("op", "assert")
+        if op in (None, ""):
+            op = "assert"
+        note = env.get("note")
         if not isinstance(actor, str) or not actor \
                 or not isinstance(seq, int) or isinstance(seq, bool) \
-                or not isinstance(hlc, str):
+                or not isinstance(hlc, str) \
+                or not isinstance(op, str) \
+                or (note is not None and not isinstance(note, str)):
             stats["refused"] += 1
             log.warning("opdist: refused malformed envelope")
             continue
@@ -485,7 +493,7 @@ def receive(
         stats["envelopes"] += 1
         res = ingest(
             actor, seq, hlc, datoms,
-            op=env.get("op") or "assert", note=env.get("note"),
+            op=op, note=note,
         )
         applied = getattr(res, "applied", 0)
         dupes = getattr(res, "dupes", 0)
